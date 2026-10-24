@@ -11,4 +11,10 @@ public interface IOrderPersistence
         CancellationToken cancellationToken = default);
 
     Task SaveOrderAsync(Order order, CancellationToken cancellationToken = default);
+
+    Task<Order?> GetOrderByIdAsync(Guid orderId, CancellationToken cancellationToken = default);
+
+    Task<(IReadOnlyList<Order> Items, int TotalCount)> SearchOrdersAsync(
+        OrderSearchCriteria criteria,
+        CancellationToken cancellationToken = default);
 }

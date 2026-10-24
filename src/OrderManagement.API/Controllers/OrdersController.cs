@@ -9,10 +9,55 @@ namespace OrderManagement.API.Controllers;
 public sealed class OrdersController : ControllerBase
 {
     private readonly CreateOrderService _createOrderService;
+    private readonly GetOrderService _getOrderService;
+    private readonly SearchOrdersService _searchOrdersService;
 
-    public OrdersController(CreateOrderService createOrderService)
+    public OrdersController(
+        CreateOrderService createOrderService,
+        GetOrderService getOrderService,
+        SearchOrdersService searchOrdersService)
     {
         _createOrderService = createOrderService;
+        _getOrderService = getOrderService;
+        _searchOrdersService = searchOrdersService;
+    }
+
+    [HttpGet("{id:guid}")]
+    [EndpointSummary("Get order by ID")]
+    [EndpointDescription("Returns a single order including its line items.")]
+    [ProducesResponseType(typeof(CreateOrderResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetById(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await _getOrderService.GetByIdAsync(id, cancellationToken);
+
+        return result.ErrorKind switch
+        {
+            GetOrderErrorKind.None => Ok(result.Response),
+            GetOrderErrorKind.NotFound => NotFound(new { error = result.ErrorMessage }),
+            _ => Problem(statusCode: StatusCodes.Status500InternalServerError)
+        };
+    }
+
+    [HttpGet]
+    [EndpointSummary("Search orders")]
+    [EndpointDescription(
+        "Searches orders with optional filters for customer, status, and created date range. " +
+        "Results are sorted by CreatedAt descending, then Id descending, and paginated.")]
+    [ProducesResponseType(typeof(SearchOrdersResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> Search(
+        [FromQuery] SearchOrdersRequest request,
+        CancellationToken cancellationToken)
+    {
+        var result = await _searchOrdersService.SearchAsync(request, cancellationToken);
+
+        return result.ErrorKind switch
+        {
+            SearchOrdersErrorKind.None => Ok(result.Response),
+            SearchOrdersErrorKind.Validation => BadRequest(new { error = result.ErrorMessage }),
+            _ => Problem(statusCode: StatusCodes.Status500InternalServerError)
+        };
     }
 
     /// <summary>

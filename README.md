@@ -1,6 +1,6 @@
 # Order Management
 
-.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create-order use case, and `POST /api/orders` endpoint are in place. Other API resources, inventory enforcement, and authentication are not implemented yet.
+.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create/get/search order use cases, and related HTTP endpoints are in place. Inventory enforcement on confirmation, status transitions, deletion, and authentication are not implemented yet.
 
 ## Tech stack
 
@@ -11,6 +11,7 @@
 | Entity Framework Core | 10.0.13 (SQL Server provider) |
 | Bogus | 35.6.5 (Development seed data) |
 | OpenAPI | `Microsoft.AspNetCore.OpenApi` 10.0.9 |
+| Swagger UI | `Swashbuckle.AspNetCore.SwaggerUI` (Development; consumes `/openapi/v1.json`) |
 | xUnit / Moq | Unit tests (`OrderManagement.Application.Tests`) |
 | Database (Development) | SQL Server LocalDB (`OrderManagement`) |
 
@@ -21,12 +22,13 @@
 | Domain model | **Implemented** | `Customer`, `Product`, `Inventory`, `Order`, `OrderItem`; `OrderStatus` enum (`Pending`, `Confirmed`, `Shipped`, `Delivered`) |
 | EF Core persistence | **Implemented** | `AppDbContext`, Fluent API configurations, `InitialCreate` migration |
 | Development seeding | **Implemented** | Bogus-based `DevelopmentDataSeeder` via `UseSeeding` / `UseAsyncSeeding` (Development only) |
-| Create-order use case | **Implemented** | `CreateOrderService` + `IOrderPersistence` port; Infrastructure `OrderPersistence` adapter |
-| `POST /api/orders` | **Implemented** | Creates a `Pending` order; prices from DB; does **not** check or decrement inventory |
-| Other HTTP endpoints | **Not present** | No GET/list/update endpoints (including no GET for the `Location` URI returned on create) |
+| Create-order use case | **Implemented** | `CreateOrderService` + `IOrderPersistence`; creates `Pending` order; prices from DB; no inventory check/deduct |
+| Get order by ID | **Implemented** | `GetOrderService`; `GET /api/orders/{id}` |
+| Search orders | **Implemented** | `SearchOrdersService`; filters, pagination, sort by `CreatedAt` desc then `Id` desc |
 | Inventory enforcement | **Not present** | Stock is not validated or updated when creating an order |
+| Status changes / deletion | **Not present** | No confirm/cancel/ship or delete endpoints |
 | Authentication / authorization policies | **Not present** | Pipeline calls `UseAuthorization()`; no auth configuration or policies |
-| Unit tests | **Implemented** | xUnit + Moq tests for `CreateOrderService` |
+| Unit tests | **Implemented** | xUnit + Moq for create, get, and search application services |
 | API / integration tests | **Not present** | No test project for the API host |
 
 ## Clean Architecture
@@ -37,7 +39,7 @@ The solution follows Clean Architecture layering. Dependencies point **inward** 
 |-------|---------|----------------|
 | Presentation | `OrderManagement.API` | ASP.NET Core host, HTTP pipeline, `OrdersController` |
 | Infrastructure | `OrderManagement.Infrastructure` | EF Core, SQL Server, migrations, Development seeding, `OrderPersistence` |
-| Application | `OrderManagement.Application` | Create-order use case, DTOs/result types, `IOrderPersistence` port |
+| Application | `OrderManagement.Application` | Order use cases (create/get/search), DTOs/results, `IOrderPersistence` port |
 | Domain | `OrderManagement.Domain` | Entities and enums |
 
 ```mermaid
@@ -74,7 +76,7 @@ src/
 │   └── appsettings.Development.json
 ├── OrderManagement.Application/
 │   ├── DependencyInjection.cs
-│   └── Orders/                      # CreateOrderService, DTOs, IOrderPersistence
+│   └── Orders/                      # Create/Get/Search services, DTOs, IOrderPersistence
 ├── OrderManagement.Domain/
 │   ├── Entities/
 │   └── Enums/
@@ -89,7 +91,9 @@ src/
 tests/
 └── OrderManagement.Application.Tests/
     └── Orders/
-        └── CreateOrderServiceTests.cs
+        ├── CreateOrderServiceTests.cs
+        ├── GetOrderServiceTests.cs
+        └── SearchOrdersServiceTests.cs
 ```
 
 ## Prerequisites
@@ -172,34 +176,105 @@ dotnet run --project src/OrderManagement.API --launch-profile https
 | `http` (default) | `http://localhost:5184` |
 | `https` | `https://localhost:7038`, `http://localhost:5184` |
 
-`ASPNETCORE_ENVIRONMENT` is `Development` in both launch profiles.
+`ASPNETCORE_ENVIRONMENT` is `Development` in both launch profiles. Launch profiles open Swagger UI (`/swagger`).
 
-In Development, the OpenAPI document is mapped via `MapOpenApi()`.
+### OpenAPI and Swagger UI (Development)
+
+| Resource | URL |
+|----------|-----|
+| OpenAPI document | `/openapi/v1.json` |
+| Swagger UI | `/swagger` |
+
+Swagger UI is enabled only in Development and uses the built-in OpenAPI document (no second document generator).
 
 ### API endpoints
 
 | Method | Route | Description |
 |--------|-------|-------------|
 | `POST` | `/api/orders` | Create a new order (`Pending`) |
+| `GET` | `/api/orders/{id}` | Get a single order by ID (includes line items) |
+| `GET` | `/api/orders` | Search orders with optional filters and pagination |
+
+#### Create order — `POST /api/orders`
 
 **Request body:**
 
 ```json
 {
-  "customerId": "00000000-0000-0000-0000-000000000000",
+  "customerId": "00000000-0000-4000-8000-000000000001",
   "items": [
-    { "productId": "00000000-0000-0000-0000-000000000000", "quantity": 1 }
+    { "productId": "00000000-0000-4000-8001-000000000001", "quantity": 1 }
   ]
 }
 ```
 
 | Status | When |
 |--------|------|
-| **201 Created** | Success; body is `CreateOrderResponse`; `Location: /api/orders/{orderId}` |
-| **400 Bad Request** | Validation failure (e.g. empty items, non-positive quantity, duplicate product IDs); body `{ "error": "..." }` |
+| **201 Created** | Success; body is order detail; `Location: /api/orders/{orderId}` |
+| **400 Bad Request** | Validation failure (empty items, non-positive quantity, duplicate product IDs); body `{ "error": "..." }` |
 | **404 Not Found** | Customer or product not found; body `{ "error": "..." }` |
 
-There is **no** `GET /api/orders/{id}` (or other order endpoints) despite the `Location` header on create. Unit prices come from current `Product.Price`; inventory is not checked or updated.
+Unit prices come from current `Product.Price`; inventory is not checked or updated.
+
+#### Get order — `GET /api/orders/{id}`
+
+| Status | When |
+|--------|------|
+| **200 OK** | Order found (includes items) |
+| **404 Not Found** | No order with that ID; body `{ "error": "..." }` |
+
+#### Search orders — `GET /api/orders`
+
+**Query parameters (all optional except defaults for paging):**
+
+| Parameter | Description |
+|-----------|-------------|
+| `customerId` | Filter by customer |
+| `status` | Filter by `OrderStatus` (`Pending`, `Confirmed`, `Shipped`, `Delivered`) |
+| `createdFrom` | Inclusive lower bound on `CreatedAt` |
+| `createdTo` | Inclusive upper bound on `CreatedAt` |
+| `page` | Page number (default `1`, must be ≥ 1) |
+| `pageSize` | Page size (default `20`, must be 1–100) |
+
+Results are sorted by **`CreatedAt` descending**, then **`Id` descending**. Queries use EF Core `AsNoTracking` with server-side filter/sort/page.
+
+**Example:**
+
+```http
+GET /api/orders?customerId=00000000-0000-4000-8000-000000000001&status=Pending&page=1&pageSize=20
+```
+
+**Response shape:**
+
+```json
+{
+  "items": [ /* order detail objects */ ],
+  "page": 1,
+  "pageSize": 20,
+  "totalCount": 0
+}
+```
+
+| Status | When |
+|--------|------|
+| **200 OK** | Success (empty `items` when no matches) |
+| **400 Bad Request** | Invalid pagination or `createdFrom` > `createdTo`; body `{ "error": "..." }` |
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant Api as OrdersController
+  participant Search as SearchOrdersService
+  participant Persist as IOrderPersistence
+
+  Client->>Api: GET /api/orders?filters&page
+  Api->>Search: SearchAsync(request)
+  Search->>Search: Validate page/pageSize/dates
+  Search->>Persist: SearchOrdersAsync(criteria)
+  Persist-->>Search: items + totalCount
+  Search-->>Api: SearchOrdersResponse
+  Api-->>Client: 200 or 400
+```
 
 ## Testing
 
@@ -283,7 +358,7 @@ flowchart TD
     SeedReg{"Is Development?"}
     RegisterSeed[Register UseSeeding and UseAsyncSeeding callbacks]
     SkipSeed[Skip seeding registration]
-    Pipeline[Configure pipeline: OpenAPI if Development, MapControllers]
+    Pipeline[Configure pipeline: OpenAPI and Swagger UI if Development, MapControllers]
     Listen[Listen for HTTP requests]
     Build --> DI
     DI --> SeedReg
