@@ -1,6 +1,6 @@
 # Order Management
 
-.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model and SQL Server persistence layer (EF Core migrations and Development seed data) are in place. Application use cases and HTTP business endpoints are not implemented yet.
+.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create-order use case, and `POST /api/orders` endpoint are in place. Other API resources, inventory enforcement, and authentication are not implemented yet.
 
 ## Tech stack
 
@@ -11,6 +11,7 @@
 | Entity Framework Core | 10.0.13 (SQL Server provider) |
 | Bogus | 35.6.5 (Development seed data) |
 | OpenAPI | `Microsoft.AspNetCore.OpenApi` 10.0.9 |
+| xUnit / Moq | Unit tests (`OrderManagement.Application.Tests`) |
 | Database (Development) | SQL Server LocalDB (`OrderManagement`) |
 
 ## Implementation status
@@ -20,11 +21,13 @@
 | Domain model | **Implemented** | `Customer`, `Product`, `Inventory`, `Order`, `OrderItem`; `OrderStatus` enum (`Pending`, `Confirmed`, `Shipped`, `Delivered`) |
 | EF Core persistence | **Implemented** | `AppDbContext`, Fluent API configurations, `InitialCreate` migration |
 | Development seeding | **Implemented** | Bogus-based `DevelopmentDataSeeder` via `UseSeeding` / `UseAsyncSeeding` (Development only) |
-| API host scaffolding | **Implemented** | DI registration, controllers pipeline, HTTPS redirection, Development OpenAPI document mapping |
-| Application layer | **Scaffolded** | Project exists and is referenced; **no application source files** (no use cases, handlers, or interfaces yet) |
-| HTTP business endpoints | **Not present** | No controllers or minimal APIs; `MapControllers()` has nothing to map |
+| Create-order use case | **Implemented** | `CreateOrderService` + `IOrderPersistence` port; Infrastructure `OrderPersistence` adapter |
+| `POST /api/orders` | **Implemented** | Creates a `Pending` order; prices from DB; does **not** check or decrement inventory |
+| Other HTTP endpoints | **Not present** | No GET/list/update endpoints (including no GET for the `Location` URI returned on create) |
+| Inventory enforcement | **Not present** | Stock is not validated or updated when creating an order |
 | Authentication / authorization policies | **Not present** | Pipeline calls `UseAuthorization()`; no auth configuration or policies |
-| Automated tests | **Not present** | No test projects in the solution |
+| Unit tests | **Implemented** | xUnit + Moq tests for `CreateOrderService` |
+| API / integration tests | **Not present** | No test project for the API host |
 
 ## Clean Architecture
 
@@ -32,9 +35,9 @@ The solution follows Clean Architecture layering. Dependencies point **inward** 
 
 | Layer | Project | Responsibility |
 |-------|---------|----------------|
-| Presentation | `OrderManagement.API` | ASP.NET Core host, HTTP pipeline |
-| Infrastructure | `OrderManagement.Infrastructure` | EF Core, SQL Server, migrations, Development seeding |
-| Application | `OrderManagement.Application` | Intended for use cases / application services (**currently empty**) |
+| Presentation | `OrderManagement.API` | ASP.NET Core host, HTTP pipeline, `OrdersController` |
+| Infrastructure | `OrderManagement.Infrastructure` | EF Core, SQL Server, migrations, Development seeding, `OrderPersistence` |
+| Application | `OrderManagement.Application` | Create-order use case, DTOs/result types, `IOrderPersistence` port |
 | Domain | `OrderManagement.Domain` | Entities and enums |
 
 ```mermaid
@@ -63,21 +66,30 @@ flowchart TB
 ```
 OrderManagement.sln
 src/
-├── OrderManagement.API/                 # ASP.NET Core host
+├── OrderManagement.API/
+│   ├── Controllers/
+│   │   └── OrdersController.cs
 │   ├── Program.cs
 │   ├── appsettings.json
 │   └── appsettings.Development.json
-├── OrderManagement.Application/         # Use cases (empty shell)
+├── OrderManagement.Application/
+│   ├── DependencyInjection.cs
+│   └── Orders/                      # CreateOrderService, DTOs, IOrderPersistence
 ├── OrderManagement.Domain/
-│   ├── Entities/                        # Customer, Product, Inventory, Order, OrderItem
-│   └── Enums/                           # OrderStatus
+│   ├── Entities/
+│   └── Enums/
 └── OrderManagement.Infrastructure/
     ├── DependencyInjection.cs
     └── Persistence/
         ├── AppDbContext.cs
+        ├── OrderPersistence.cs
         ├── DevelopmentDataSeeder.cs
-        ├── Configurations/              # Fluent API entity configurations
-        └── Migrations/                  # InitialCreate
+        ├── Configurations/
+        └── Migrations/
+tests/
+└── OrderManagement.Application.Tests/
+    └── Orders/
+        └── CreateOrderServiceTests.cs
 ```
 
 ## Prerequisites
@@ -162,11 +174,42 @@ dotnet run --project src/OrderManagement.API --launch-profile https
 
 `ASPNETCORE_ENVIRONMENT` is `Development` in both launch profiles.
 
-In Development, the OpenAPI document is mapped via `MapOpenApi()`. There are **no business API endpoints** yet (no controllers or minimal APIs).
+In Development, the OpenAPI document is mapped via `MapOpenApi()`.
+
+### API endpoints
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `POST` | `/api/orders` | Create a new order (`Pending`) |
+
+**Request body:**
+
+```json
+{
+  "customerId": "00000000-0000-0000-0000-000000000000",
+  "items": [
+    { "productId": "00000000-0000-0000-0000-000000000000", "quantity": 1 }
+  ]
+}
+```
+
+| Status | When |
+|--------|------|
+| **201 Created** | Success; body is `CreateOrderResponse`; `Location: /api/orders/{orderId}` |
+| **400 Bad Request** | Validation failure (e.g. empty items, non-positive quantity, duplicate product IDs); body `{ "error": "..." }` |
+| **404 Not Found** | Customer or product not found; body `{ "error": "..." }` |
+
+There is **no** `GET /api/orders/{id}` (or other order endpoints) despite the `Location` header on create. Unit prices come from current `Product.Price`; inventory is not checked or updated.
 
 ## Testing
 
-Automated tests are **not present**. The solution does not include test projects (xUnit, NUnit, MSTest, or otherwise). There are no test commands to run at this time.
+Application-layer unit tests live in `tests/OrderManagement.Application.Tests` (xUnit + Moq; `IOrderPersistence` is mocked). There are no API or integration tests.
+
+From the repository root:
+
+```bash
+dotnet test
+```
 
 ## Entity relationship diagram
 
@@ -236,7 +279,7 @@ Migrations and seeding run only through the EF CLI path below—not during `dotn
 flowchart TD
   subgraph apiStart [API startup: dotnet run]
     Build[Build WebApplication]
-    DI[Register services including AddInfrastructure]
+    DI[Register AddApplication and AddInfrastructure]
     SeedReg{"Is Development?"}
     RegisterSeed[Register UseSeeding and UseAsyncSeeding callbacks]
     SkipSeed[Skip seeding registration]

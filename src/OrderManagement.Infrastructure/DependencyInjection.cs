@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using OrderManagement.Application.Orders;
 using OrderManagement.Infrastructure.Persistence;
 
 namespace OrderManagement.Infrastructure;
@@ -26,6 +27,8 @@ public static class DependencyInjection
                     await DevelopmentDataSeeder.SeedAsync((AppDbContext)context, cancellationToken));
             }
         });
+
+        services.AddScoped<IOrderPersistence, OrderPersistence>();
 
         return services;
     }

@@ -1,0 +1,14 @@
+using OrderManagement.Domain.Entities;
+
+namespace OrderManagement.Application.Orders;
+
+public interface IOrderPersistence
+{
+    Task<bool> CustomerExistsAsync(Guid customerId, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<ProductPrice>> GetProductPricesAsync(
+        IReadOnlyCollection<Guid> productIds,
+        CancellationToken cancellationToken = default);
+
+    Task SaveOrderAsync(Order order, CancellationToken cancellationToken = default);
+}
