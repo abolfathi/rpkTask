@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OrderManagement.Domain", "s
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OrderManagement.Application", "src\OrderManagement.Application\OrderManagement.Application.csproj", "{511DDB48-A13C-46B1-97DC-4D537ADA5034}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OrderManagement.Infrastructure", "src\OrderManagement.Infrastructure\OrderManagement.Infrastructure.csproj", "{56E3C923-CA92-41A4-9A4F-624C47453A94}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -43,6 +45,18 @@ Global
 		{511DDB48-A13C-46B1-97DC-4D537ADA5034}.Release|x64.Build.0 = Release|Any CPU
 		{511DDB48-A13C-46B1-97DC-4D537ADA5034}.Release|x86.ActiveCfg = Release|Any CPU
 		{511DDB48-A13C-46B1-97DC-4D537ADA5034}.Release|x86.Build.0 = Release|Any CPU
+		{56E3C923-CA92-41A4-9A4F-624C47453A94}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{56E3C923-CA92-41A4-9A4F-624C47453A94}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{56E3C923-CA92-41A4-9A4F-624C47453A94}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{56E3C923-CA92-41A4-9A4F-624C47453A94}.Debug|x64.Build.0 = Debug|Any CPU
+		{56E3C923-CA92-41A4-9A4F-624C47453A94}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{56E3C923-CA92-41A4-9A4F-624C47453A94}.Debug|x86.Build.0 = Debug|Any CPU
+		{56E3C923-CA92-41A4-9A4F-624C47453A94}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{56E3C923-CA92-41A4-9A4F-624C47453A94}.Release|Any CPU.Build.0 = Release|Any CPU
+		{56E3C923-CA92-41A4-9A4F-624C47453A94}.Release|x64.ActiveCfg = Release|Any CPU
+		{56E3C923-CA92-41A4-9A4F-624C47453A94}.Release|x64.Build.0 = Release|Any CPU
+		{56E3C923-CA92-41A4-9A4F-624C47453A94}.Release|x86.ActiveCfg = Release|Any CPU
+		{56E3C923-CA92-41A4-9A4F-624C47453A94}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -50,5 +64,6 @@ Global
 	GlobalSection(NestedProjects) = preSolution
 		{9847BCB7-BB34-4766-95E9-8897A92999E8} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{511DDB48-A13C-46B1-97DC-4D537ADA5034} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{56E3C923-CA92-41A4-9A4F-624C47453A94} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal
