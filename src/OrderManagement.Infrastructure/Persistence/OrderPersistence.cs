@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using OrderManagement.Application.Orders;
 using OrderManagement.Domain.Entities;
+using OrderManagement.Domain.Enums;
 
 namespace OrderManagement.Infrastructure.Persistence;
 
@@ -93,5 +94,140 @@ public sealed class OrderPersistence : IOrderPersistence
             .ToListAsync(cancellationToken);
 
         return (items, totalCount);
+    }
+
+    public async Task<Order?> GetOrderForUpdateAsync(Guid orderId, CancellationToken cancellationToken = default)
+    {
+        return await _dbContext.Orders
+            .AsNoTracking()
+            .Include(o => o.Items)
+            .FirstOrDefaultAsync(o => o.Id == orderId, cancellationToken);
+    }
+
+    public async Task<ConfirmOrderOutcome> ConfirmOrderAsync(
+        Guid orderId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            var order = await _dbContext.Orders
+                .Include(o => o.Items)
+                .FirstOrDefaultAsync(o => o.Id == orderId, cancellationToken);
+
+            if (order is null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return ConfirmOrderOutcome.OrderNotFound();
+            }
+
+            if (order.Status != OrderStatus.Pending)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return ConfirmOrderOutcome.InvalidState(
+                    $"Order is '{order.Status}' and cannot be confirmed.");
+            }
+
+            // Stable ProductId order so concurrent multi-product confirms acquire inventory locks consistently.
+            var requiredByProduct = order.Items
+                .GroupBy(i => i.ProductId)
+                .OrderBy(g => g.Key)
+                .Select(g => (ProductId: g.Key, Quantity: g.Sum(i => i.Quantity)))
+                .ToList();
+
+            var productIds = requiredByProduct.Select(r => r.ProductId).ToList();
+            var inventories = await _dbContext.Inventories
+                .Where(i => productIds.Contains(i.ProductId))
+                .ToListAsync(cancellationToken);
+
+            var inventoryByProduct = inventories.ToDictionary(i => i.ProductId);
+
+            foreach (var (productId, requiredQty) in requiredByProduct)
+            {
+                if (!inventoryByProduct.TryGetValue(productId, out var inventory))
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    return ConfirmOrderOutcome.InsufficientStock(
+                        $"No inventory record found for product '{productId}'.");
+                }
+
+                if (inventory.Quantity < requiredQty)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    return ConfirmOrderOutcome.InsufficientStock(
+                        $"Insufficient inventory for product '{productId}'. Required {requiredQty}, available {inventory.Quantity}.");
+                }
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            foreach (var (productId, requiredQty) in requiredByProduct)
+            {
+                var affected = await _dbContext.Inventories
+                    .Where(i => i.ProductId == productId && i.Quantity >= requiredQty)
+                    .ExecuteUpdateAsync(
+                        setters => setters
+                            .SetProperty(i => i.Quantity, i => i.Quantity - requiredQty)
+                            .SetProperty(i => i.UpdatedAt, now),
+                        cancellationToken);
+
+                if (affected != 1)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    return ConfirmOrderOutcome.ConcurrentConflict(
+                        $"Inventory for product '{productId}' changed during confirmation. Try again.");
+                }
+            }
+
+            var orderAffected = await _dbContext.Orders
+                .Where(o => o.Id == orderId && o.Status == OrderStatus.Pending)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(o => o.Status, OrderStatus.Confirmed)
+                        .SetProperty(o => o.UpdatedAt, now),
+                    cancellationToken);
+
+            if (orderAffected != 1)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return ConfirmOrderOutcome.ConcurrentConflict(
+                    "The order was modified by another request during confirmation.");
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+
+            // Detach tracked entities so a fresh read reflects ExecuteUpdate results.
+            _dbContext.ChangeTracker.Clear();
+
+            var confirmed = await _dbContext.Orders
+                .AsNoTracking()
+                .Include(o => o.Items)
+                .FirstAsync(o => o.Id == orderId, cancellationToken);
+
+            return ConfirmOrderOutcome.Success(confirmed);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    public async Task<bool> TryUpdateStatusAsync(
+        Guid orderId,
+        OrderStatus expectedCurrent,
+        OrderStatus next,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var affected = await _dbContext.Orders
+            .Where(o => o.Id == orderId && o.Status == expectedCurrent)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(o => o.Status, next)
+                    .SetProperty(o => o.UpdatedAt, now),
+                cancellationToken);
+
+        return affected == 1;
     }
 }

@@ -1,6 +1,6 @@
 # Order Management
 
-.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create/get/search order use cases, and related HTTP endpoints are in place. Inventory enforcement on confirmation, status transitions, deletion, and authentication are not implemented yet.
+.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create/get/search orders, and status transitions (including inventory deduct on confirm) are implemented. Deletion and authentication are not implemented.
 
 ## Tech stack
 
@@ -22,13 +22,14 @@
 | Domain model | **Implemented** | `Customer`, `Product`, `Inventory`, `Order`, `OrderItem`; `OrderStatus` enum (`Pending`, `Confirmed`, `Shipped`, `Delivered`) |
 | EF Core persistence | **Implemented** | `AppDbContext`, Fluent API configurations, `InitialCreate` migration |
 | Development seeding | **Implemented** | Bogus-based `DevelopmentDataSeeder` via `UseSeeding` / `UseAsyncSeeding` (Development only) |
-| Create-order use case | **Implemented** | `CreateOrderService` + `IOrderPersistence`; creates `Pending` order; prices from DB; no inventory check/deduct |
+| Create-order use case | **Implemented** | `CreateOrderService` + `IOrderPersistence`; creates `Pending` order; prices from DB; no inventory check/deduct on create |
 | Get order by ID | **Implemented** | `GetOrderService`; `GET /api/orders/{id}` |
 | Search orders | **Implemented** | `SearchOrdersService`; filters, pagination, sort by `CreatedAt` desc then `Id` desc |
-| Inventory enforcement | **Not present** | Stock is not validated or updated when creating an order |
-| Status changes / deletion | **Not present** | No confirm/cancel/ship or delete endpoints |
+| Status transitions | **Implemented** | `UpdateOrderStatusService`; `PATCH /api/orders/{id}/status`; forward-only `Pending → Confirmed → Shipped → Delivered` |
+| Inventory on confirm | **Implemented** | Confirm validates stock for all lines and deducts atomically in a DB transaction |
+| Order deletion | **Not present** | No delete endpoint |
 | Authentication / authorization policies | **Not present** | Pipeline calls `UseAuthorization()`; no auth configuration or policies |
-| Unit tests | **Implemented** | xUnit + Moq for create, get, and search application services |
+| Unit tests | **Implemented** | xUnit + Moq for create, get, search, and status-update application services |
 | API / integration tests | **Not present** | No test project for the API host |
 
 ## Clean Architecture
@@ -39,8 +40,8 @@ The solution follows Clean Architecture layering. Dependencies point **inward** 
 |-------|---------|----------------|
 | Presentation | `OrderManagement.API` | ASP.NET Core host, HTTP pipeline, `OrdersController` |
 | Infrastructure | `OrderManagement.Infrastructure` | EF Core, SQL Server, migrations, Development seeding, `OrderPersistence` |
-| Application | `OrderManagement.Application` | Order use cases (create/get/search), DTOs/results, `IOrderPersistence` port |
-| Domain | `OrderManagement.Domain` | Entities and enums |
+| Application | `OrderManagement.Application` | Order use cases (create/get/search/status), DTOs/results, `IOrderPersistence` port |
+| Domain | `OrderManagement.Domain` | Entities, enums, status transition policy |
 
 ```mermaid
 flowchart TB
@@ -76,10 +77,11 @@ src/
 │   └── appsettings.Development.json
 ├── OrderManagement.Application/
 │   ├── DependencyInjection.cs
-│   └── Orders/                      # Create/Get/Search services, DTOs, IOrderPersistence
+│   └── Orders/                      # Create/Get/Search/Status services, DTOs, IOrderPersistence
 ├── OrderManagement.Domain/
 │   ├── Entities/
-│   └── Enums/
+│   ├── Enums/
+│   └── Orders/                      # OrderStatusTransitionPolicy
 └── OrderManagement.Infrastructure/
     ├── DependencyInjection.cs
     └── Persistence/
@@ -93,7 +95,8 @@ tests/
     └── Orders/
         ├── CreateOrderServiceTests.cs
         ├── GetOrderServiceTests.cs
-        └── SearchOrdersServiceTests.cs
+        ├── SearchOrdersServiceTests.cs
+        └── UpdateOrderStatusServiceTests.cs
 ```
 
 ## Prerequisites
@@ -194,6 +197,7 @@ Swagger UI is enabled only in Development and uses the built-in OpenAPI document
 | `POST` | `/api/orders` | Create a new order (`Pending`) |
 | `GET` | `/api/orders/{id}` | Get a single order by ID (includes line items) |
 | `GET` | `/api/orders` | Search orders with optional filters and pagination |
+| `PATCH` | `/api/orders/{id}/status` | Advance order status (inventory deducted on confirm) |
 
 #### Create order — `POST /api/orders`
 
@@ -274,6 +278,57 @@ sequenceDiagram
   Persist-->>Search: items + totalCount
   Search-->>Api: SearchOrdersResponse
   Api-->>Client: 200 or 400
+```
+
+### Order status workflow
+
+Orders move forward one step at a time. There is no `Cancelled` status and no reverse transitions.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Pending
+  Pending --> Confirmed: inventory OK and deducted
+  Confirmed --> Shipped
+  Shipped --> Delivered
+  Delivered --> [*]
+```
+
+| From | To | Side effects |
+|------|----|--------------|
+| `Pending` | `Confirmed` | Re-check stock for all lines; deduct inventory; set status — all in one DB transaction |
+| `Confirmed` | `Shipped` | Status only (conditional update) |
+| `Shipped` | `Delivered` | Status only (conditional update) |
+
+Any other target (including skipping steps) is rejected with **400**. Creating an order still does **not** touch inventory; stock is enforced only when confirming.
+
+Concurrency: confirm uses conditional inventory updates (`Quantity >= required`) and a conditional status update (`Status == Pending`) so concurrent confirms cannot drive stock negative or double-confirm. Non-confirm steps update only when the expected current status still matches.
+
+#### Update status — `PATCH /api/orders/{id}/status`
+
+**Request body:**
+
+```json
+{
+  "status": "Confirmed"
+}
+```
+
+`status` accepts enum names (`Pending`, `Confirmed`, `Shipped`, `Delivered`) or their integer values. Cancellation is not supported.
+
+| Status | When |
+|--------|------|
+| **200 OK** | Transition applied; body is order detail |
+| **400 Bad Request** | Invalid transition or invalid status value; body `{ "error": "..." }` |
+| **404 Not Found** | Order not found; body `{ "error": "..." }` |
+| **409 Conflict** | Insufficient inventory or concurrent modification; body `{ "error": "..." }` |
+
+**Example (confirm):**
+
+```http
+PATCH /api/orders/{orderId}/status
+Content-Type: application/json
+
+{ "status": "Confirmed" }
 ```
 
 ## Testing

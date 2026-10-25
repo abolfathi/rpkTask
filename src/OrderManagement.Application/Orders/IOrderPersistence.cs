@@ -1,4 +1,5 @@
 using OrderManagement.Domain.Entities;
+using OrderManagement.Domain.Enums;
 
 namespace OrderManagement.Application.Orders;
 
@@ -16,5 +17,15 @@ public interface IOrderPersistence
 
     Task<(IReadOnlyList<Order> Items, int TotalCount)> SearchOrdersAsync(
         OrderSearchCriteria criteria,
+        CancellationToken cancellationToken = default);
+
+    Task<Order?> GetOrderForUpdateAsync(Guid orderId, CancellationToken cancellationToken = default);
+
+    Task<ConfirmOrderOutcome> ConfirmOrderAsync(Guid orderId, CancellationToken cancellationToken = default);
+
+    Task<bool> TryUpdateStatusAsync(
+        Guid orderId,
+        OrderStatus expectedCurrent,
+        OrderStatus next,
         CancellationToken cancellationToken = default);
 }

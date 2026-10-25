@@ -11,15 +11,18 @@ public sealed class OrdersController : ControllerBase
     private readonly CreateOrderService _createOrderService;
     private readonly GetOrderService _getOrderService;
     private readonly SearchOrdersService _searchOrdersService;
+    private readonly UpdateOrderStatusService _updateOrderStatusService;
 
     public OrdersController(
         CreateOrderService createOrderService,
         GetOrderService getOrderService,
-        SearchOrdersService searchOrdersService)
+        SearchOrdersService searchOrdersService,
+        UpdateOrderStatusService updateOrderStatusService)
     {
         _createOrderService = createOrderService;
         _getOrderService = getOrderService;
         _searchOrdersService = searchOrdersService;
+        _updateOrderStatusService = updateOrderStatusService;
     }
 
     [HttpGet("{id:guid}")]
@@ -56,6 +59,33 @@ public sealed class OrdersController : ControllerBase
         {
             SearchOrdersErrorKind.None => Ok(result.Response),
             SearchOrdersErrorKind.Validation => BadRequest(new { error = result.ErrorMessage }),
+            _ => Problem(statusCode: StatusCodes.Status500InternalServerError)
+        };
+    }
+
+    [HttpPatch("{id:guid}/status")]
+    [EndpointSummary("Update order status")]
+    [EndpointDescription(
+        "Advances an order along Pending → Confirmed → Shipped → Delivered. " +
+        "Confirming validates inventory for all line items and deducts stock atomically. " +
+        "Invalid transitions are rejected. Cancellation is not supported.")]
+    [ProducesResponseType(typeof(CreateOrderResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> UpdateStatus(
+        Guid id,
+        [FromBody] UpdateOrderStatusRequest request,
+        CancellationToken cancellationToken)
+    {
+        var result = await _updateOrderStatusService.UpdateAsync(id, request, cancellationToken);
+
+        return result.ErrorKind switch
+        {
+            UpdateOrderStatusErrorKind.None => Ok(result.Response),
+            UpdateOrderStatusErrorKind.Validation => BadRequest(new { error = result.ErrorMessage }),
+            UpdateOrderStatusErrorKind.NotFound => NotFound(new { error = result.ErrorMessage }),
+            UpdateOrderStatusErrorKind.Conflict => Conflict(new { error = result.ErrorMessage }),
             _ => Problem(statusCode: StatusCodes.Status500InternalServerError)
         };
     }
