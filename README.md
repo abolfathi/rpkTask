@@ -496,8 +496,11 @@ Authorization: Bearer <admin-access-token>
 |---------|----------|
 | `tests/OrderManagement.Application.Tests` | Application services (xUnit + Moq; `IOrderPersistence` mocked), including delete outcomes |
 | `tests/OrderManagement.API.Tests` | JWT auth; delete Admin-only (401/403/204/404); Dev token create/validation |
+| `tests/OrderManagement.Infrastructure.Tests` | Soft-delete persistence against SQL Server LocalDB (`OrderPersistence`) |
 
 API auth tests use `WebApplicationFactory` with an in-memory `Jwt:Key` and a stubbed `IOrderPersistence` (no SQL Server required for those cases).
+
+Infrastructure soft-delete tests require **SQL Server LocalDB** (`(localdb)\mssqllocaldb`). They create and drop a unique database per test run and apply EF migrations — EF InMemory is not used.
 
 From the repository root:
 
