@@ -23,19 +23,19 @@
 | Area | Status | Details |
 |------|--------|---------|
 | Domain model | **Implemented** | `Customer`, `Product`, `Inventory`, `Order`, `OrderItem`; `OrderStatus` enum (`Pending`, `Confirmed`, `Shipped`, `Delivered`) |
-| EF Core persistence | **Implemented** | `AppDbContext`, Fluent API configurations; migrations `InitialCreate`, `AddOrderSoftDelete` |
+| EF Core persistence | **Implemented** | `AppDbContext`, Fluent API configurations; migrations `InitialCreate`, `AddOrderSoftDelete`, `AddOrderSearchIndexes` |
 | Development seeding | **Implemented** | Bogus-based `DevelopmentDataSeeder` via `UseSeeding` / `UseAsyncSeeding` (Development only) |
 | Create-order use case | **Implemented** | `CreateOrderService` + `IOrderPersistence`; creates `Pending` order; prices from DB; no inventory check/deduct on create |
 | Bulk create orders | **Implemented** | `BulkCreateOrdersService`; `POST /api/orders/bulk`; all-or-nothing; `EFCore.BulkExtensions` transactional inserts |
 | Get order by ID | **Implemented** | `GetOrderService`; `GET /api/orders/{id}` |
-| Search orders | **Implemented** | `SearchOrdersService`; filters, pagination, sort by `CreatedAt` desc then `Id` desc |
+| Search orders | **Implemented** | `SearchOrdersService`; filters, pagination, sort by `CreatedAt` desc then `Id` desc; filtered search indexes |
 | Status transitions | **Implemented** | `UpdateOrderStatusService`; `PATCH /api/orders/{id}/status`; forward-only `Pending → Confirmed → Shipped → Delivered` |
 | Inventory on confirm | **Implemented** | Confirm validates stock for all lines and deducts atomically in a DB transaction |
 | Order deletion | **Implemented** | Soft delete (`IsDeleted`/`DeletedAt`); Admin only; Pending/Confirmed; global filter hides deleted from Get/Search; Shipped/Delivered → 409 |
 | Authentication / authorization | **Implemented** | JWT Bearer; roles `Admin` and `User`; order read/write require any authenticated role; delete requires `Admin` |
 | Structured logging | **Implemented** | Serilog on the API host; Console + rolling File; HTTP request logging |
 | Unit tests | **Implemented** | xUnit + Moq for create, bulk create, get, search, status-update, and delete application services |
-| API auth tests | **Implemented** | `OrderManagement.API.Tests` — 401 without token, Admin/User access, Dev token endpoint |
+| API auth tests | **Implemented** | `OrderManagement.API.Tests` — JWT, delete Admin-only, search 401/200/400, Dev token endpoint |
 
 ## Clean Architecture
 
@@ -115,7 +115,8 @@ tests/
     └── Auth/
         ├── OrderApiFactory.cs
         ├── AuthenticationAuthorizationTests.cs
-        └── DeleteOrderAuthorizationTests.cs
+        ├── DeleteOrderAuthorizationTests.cs
+        └── SearchOrdersApiTests.cs
 ```
 
 ## Prerequisites
@@ -412,8 +413,10 @@ GET /api/orders?customerId=00000000-0000-4000-8000-000000000001&status=Pending&p
 | Status | When |
 |--------|------|
 | **200 OK** | Success (empty `items` when no matches) |
-| **400 Bad Request** | Invalid pagination or `createdFrom` > `createdTo`; body `{ "error": "..." }` |
+| **400 Bad Request** | Invalid `page`/`pageSize`, invalid `status`, or `createdFrom` > `createdTo`; body `{ "error": "..." }` |
 | **401 Unauthorized** | Missing or invalid bearer token |
+
+Active (non-deleted) rows are supported by filtered SQL indexes on `(CreatedAt, Id)` and `(CustomerId, Status, CreatedAt, Id)` for search pagination and common filters. Soft-deleted rows remain covered by the FK `CustomerId` index.
 
 ```mermaid
 sequenceDiagram
@@ -536,7 +539,7 @@ Authorization: Bearer <admin-access-token>
 | Project | Coverage |
 |---------|----------|
 | `tests/OrderManagement.Application.Tests` | Application services (xUnit + Moq; `IOrderPersistence` mocked), including create, bulk create, and delete outcomes |
-| `tests/OrderManagement.API.Tests` | JWT auth; delete Admin-only (401/403/204/404); Dev token create/validation |
+| `tests/OrderManagement.API.Tests` | JWT auth; delete Admin-only; search (401/200/400 + criteria); Dev token create/validation |
 | `tests/OrderManagement.Infrastructure.Tests` | Soft-delete and bulk `SaveOrdersAsync` (success + transaction rollback) against SQL Server LocalDB |
 
 API auth tests use `WebApplicationFactory` with an in-memory `Jwt:Key` and a stubbed `IOrderPersistence` (no SQL Server required for those cases).

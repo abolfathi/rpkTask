@@ -29,6 +29,21 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
 
         builder.HasQueryFilter(o => !o.IsDeleted);
 
+        // Keep a dedicated CustomerId index for FK lookups (all rows, including soft-deleted).
+        builder.HasIndex(o => o.CustomerId)
+            .HasDatabaseName("IX_Orders_CustomerId");
+
+        // Filtered indexes match the soft-delete query filter used by search/read queries.
+        builder.HasIndex(o => new { o.CreatedAt, o.Id })
+            .IsDescending(true, true)
+            .HasFilter("[IsDeleted] = 0")
+            .HasDatabaseName("IX_Orders_CreatedAt_Id_Active");
+
+        builder.HasIndex(o => new { o.CustomerId, o.Status, o.CreatedAt, o.Id })
+            .IsDescending(false, false, true, true)
+            .HasFilter("[IsDeleted] = 0")
+            .HasDatabaseName("IX_Orders_CustomerId_Status_CreatedAt_Id_Active");
+
         builder.HasOne(o => o.Customer)
             .WithMany()
             .HasForeignKey(o => o.CustomerId)

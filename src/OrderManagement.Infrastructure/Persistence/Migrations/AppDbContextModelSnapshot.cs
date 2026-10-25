@@ -99,7 +99,18 @@ namespace OrderManagement.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("CustomerId");
+                    b.HasIndex("CustomerId")
+                        .HasDatabaseName("IX_Orders_CustomerId");
+
+                    b.HasIndex("CreatedAt", "Id")
+                        .IsDescending()
+                        .HasDatabaseName("IX_Orders_CreatedAt_Id_Active")
+                        .HasFilter("[IsDeleted] = 0");
+
+                    b.HasIndex("CustomerId", "Status", "CreatedAt", "Id")
+                        .IsDescending(false, false, true, true)
+                        .HasDatabaseName("IX_Orders_CustomerId_Status_CreatedAt_Id_Active")
+                        .HasFilter("[IsDeleted] = 0");
 
                     b.ToTable("Orders");
                 });

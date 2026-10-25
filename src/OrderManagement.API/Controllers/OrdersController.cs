@@ -55,8 +55,9 @@ public sealed class OrdersController : ControllerBase
     [HttpGet]
     [EndpointSummary("Search orders")]
     [EndpointDescription(
-        "Searches orders with optional filters for customer, status, and created date range. " +
-        "Results are sorted by CreatedAt descending, then Id descending, and paginated. " +
+        "Searches orders with optional query parameters: customerId, status, createdFrom, createdTo, page, pageSize. " +
+        "Defaults: page=1, pageSize=20 (pageSize max 100). " +
+        "Results are sorted by CreatedAt descending, then Id descending (server-side). " +
         "Requires authentication (Admin or User).")]
     [ProducesResponseType(typeof(SearchOrdersResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
