@@ -6,7 +6,8 @@ using OrderManagement.API.Auth;
 
 namespace OrderManagement.API.Tests.Auth;
 
-public sealed class AuthenticationAuthorizationTests : IClassFixture<OrderApiFactory>
+[Collection(OrderApiCollection.Name)]
+public sealed class AuthenticationAuthorizationTests
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

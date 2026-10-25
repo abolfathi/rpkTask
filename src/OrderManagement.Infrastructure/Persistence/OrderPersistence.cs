@@ -230,4 +230,63 @@ public sealed class OrderPersistence : IOrderPersistence
 
         return affected == 1;
     }
+
+    public async Task<DeleteOrderOutcome> DeleteOrderAsync(
+        Guid orderId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            var order = await _dbContext.Orders
+                .Include(o => o.Items)
+                .FirstOrDefaultAsync(o => o.Id == orderId, cancellationToken);
+
+            if (order is null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return DeleteOrderOutcome.OrderNotFound();
+            }
+
+            if (order.Status != OrderStatus.Pending)
+            {
+                var requiredByProduct = order.Items
+                    .GroupBy(i => i.ProductId)
+                    .OrderBy(g => g.Key)
+                    .Select(g => (ProductId: g.Key, Quantity: g.Sum(i => i.Quantity)))
+                    .ToList();
+
+                var now = DateTimeOffset.UtcNow;
+                foreach (var (productId, restoreQty) in requiredByProduct)
+                {
+                    var affected = await _dbContext.Inventories
+                        .Where(i => i.ProductId == productId)
+                        .ExecuteUpdateAsync(
+                            setters => setters
+                                .SetProperty(i => i.Quantity, i => i.Quantity + restoreQty)
+                                .SetProperty(i => i.UpdatedAt, now),
+                            cancellationToken);
+
+                    if (affected != 1)
+                    {
+                        await transaction.RollbackAsync(cancellationToken);
+                        return DeleteOrderOutcome.ConcurrentConflict(
+                            $"Inventory for product '{productId}' could not be restored during delete. Try again.");
+                    }
+                }
+            }
+
+            _dbContext.Orders.Remove(order);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            return DeleteOrderOutcome.Success();
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
 }

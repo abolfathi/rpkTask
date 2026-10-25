@@ -14,6 +14,8 @@ public sealed class OrderApiFactory : WebApplicationFactory<Program>
 {
     public const string TestJwtKey = "integration-test-signing-key-at-least-32-chars!";
 
+    public Mock<IOrderPersistence> Persistence { get; } = new();
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
@@ -39,15 +41,17 @@ public sealed class OrderApiFactory : WebApplicationFactory<Program>
         {
             services.RemoveAll<IOrderPersistence>();
 
-            var persistence = new Mock<IOrderPersistence>();
-            persistence
+            Persistence
                 .Setup(p => p.GetOrderByIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync((Order?)null);
-            persistence
+            Persistence
                 .Setup(p => p.GetOrderForUpdateAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync((Order?)null);
+            Persistence
+                .Setup(p => p.DeleteOrderAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(DeleteOrderOutcome.OrderNotFound());
 
-            services.AddSingleton(persistence.Object);
+            services.AddSingleton(Persistence.Object);
         });
     }
 }

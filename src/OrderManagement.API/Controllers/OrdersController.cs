@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using OrderManagement.API.Auth;
 using OrderManagement.Application.Orders;
 
 namespace OrderManagement.API.Controllers;
@@ -14,17 +15,20 @@ public sealed class OrdersController : ControllerBase
     private readonly GetOrderService _getOrderService;
     private readonly SearchOrdersService _searchOrdersService;
     private readonly UpdateOrderStatusService _updateOrderStatusService;
+    private readonly DeleteOrderService _deleteOrderService;
 
     public OrdersController(
         CreateOrderService createOrderService,
         GetOrderService getOrderService,
         SearchOrdersService searchOrdersService,
-        UpdateOrderStatusService updateOrderStatusService)
+        UpdateOrderStatusService updateOrderStatusService,
+        DeleteOrderService deleteOrderService)
     {
         _createOrderService = createOrderService;
         _getOrderService = getOrderService;
         _searchOrdersService = searchOrdersService;
         _updateOrderStatusService = updateOrderStatusService;
+        _deleteOrderService = deleteOrderService;
     }
 
     [HttpGet("{id:guid}")]
@@ -93,6 +97,31 @@ public sealed class OrdersController : ControllerBase
             UpdateOrderStatusErrorKind.Validation => BadRequest(new { error = result.ErrorMessage }),
             UpdateOrderStatusErrorKind.NotFound => NotFound(new { error = result.ErrorMessage }),
             UpdateOrderStatusErrorKind.Conflict => Conflict(new { error = result.ErrorMessage }),
+            _ => Problem(statusCode: StatusCodes.Status500InternalServerError)
+        };
+    }
+
+    [HttpDelete("{id:guid}")]
+    [Authorize(Roles = AppRoles.Admin)]
+    [EndpointSummary("Delete order")]
+    [EndpointDescription(
+        "Permanently deletes an order and its line items. Admin only. " +
+        "Pending orders do not change inventory. Confirmed, Shipped, or Delivered orders restore " +
+        "deducted stock for all lines in the same transaction before delete.")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await _deleteOrderService.DeleteAsync(id, cancellationToken);
+
+        return result.ErrorKind switch
+        {
+            DeleteOrderErrorKind.None => NoContent(),
+            DeleteOrderErrorKind.NotFound => NotFound(new { error = result.ErrorMessage }),
+            DeleteOrderErrorKind.Conflict => Conflict(new { error = result.ErrorMessage }),
             _ => Problem(statusCode: StatusCodes.Status500InternalServerError)
         };
     }

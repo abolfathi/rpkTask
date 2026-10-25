@@ -28,4 +28,6 @@ public interface IOrderPersistence
         OrderStatus expectedCurrent,
         OrderStatus next,
         CancellationToken cancellationToken = default);
+
+    Task<DeleteOrderOutcome> DeleteOrderAsync(Guid orderId, CancellationToken cancellationToken = default);
 }

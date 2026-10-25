@@ -1,6 +1,6 @@
 # Order Management
 
-.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create/get/search orders, status transitions (including inventory deduct on confirm), and JWT Bearer authentication are implemented. Order deletion is not implemented (planned later as Admin-only).
+.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create/get/search/delete orders, status transitions (including inventory deduct on confirm), JWT Bearer authentication, and Serilog logging are implemented. Order deletion is Admin-only and restores inventory when stock was previously deducted.
 
 ## Tech stack
 
@@ -29,8 +29,8 @@
 | Search orders | **Implemented** | `SearchOrdersService`; filters, pagination, sort by `CreatedAt` desc then `Id` desc |
 | Status transitions | **Implemented** | `UpdateOrderStatusService`; `PATCH /api/orders/{id}/status`; forward-only `Pending → Confirmed → Shipped → Delivered` |
 | Inventory on confirm | **Implemented** | Confirm validates stock for all lines and deducts atomically in a DB transaction |
-| Order deletion | **Not present** | No delete endpoint (future: Admin-only) |
-| Authentication / authorization | **Implemented** | JWT Bearer; roles `Admin` and `User`; all current order endpoints require any authenticated role (`[Authorize]`) |
+| Order deletion | **Implemented** | `DELETE /api/orders/{id}`; Admin only; cascade OrderItems; restore inventory when status is not Pending |
+| Authentication / authorization | **Implemented** | JWT Bearer; roles `Admin` and `User`; order read/write require any authenticated role; delete requires `Admin` |
 | Structured logging | **Implemented** | Serilog on the API host; Console + rolling File; HTTP request logging |
 | Unit tests | **Implemented** | xUnit + Moq for create, get, search, and status-update application services |
 | API auth tests | **Implemented** | `OrderManagement.API.Tests` — 401 without token, Admin/User access, Dev token endpoint |
@@ -43,7 +43,7 @@ The solution follows Clean Architecture layering. Dependencies point **inward** 
 |-------|---------|----------------|
 | Presentation | `OrderManagement.API` | ASP.NET Core host, JWT auth, Serilog, `OrdersController`, Dev token endpoint |
 | Infrastructure | `OrderManagement.Infrastructure` | EF Core, SQL Server, migrations, Development seeding, `OrderPersistence` |
-| Application | `OrderManagement.Application` | Order use cases (create/get/search/status), DTOs/results, `IOrderPersistence` port |
+| Application | `OrderManagement.Application` | Order use cases (create/get/search/status/delete), DTOs/results, `IOrderPersistence` port |
 | Domain | `OrderManagement.Domain` | Entities, enums, status transition policy |
 
 ```mermaid
@@ -83,7 +83,7 @@ src/
 │   └── appsettings.Development.json
 ├── OrderManagement.Application/
 │   ├── DependencyInjection.cs
-│   └── Orders/                      # Create/Get/Search/Status services, DTOs, IOrderPersistence
+│   └── Orders/                      # Create/Get/Search/Status/Delete services, DTOs, IOrderPersistence
 ├── OrderManagement.Domain/
 │   ├── Entities/
 │   ├── Enums/
@@ -102,11 +102,13 @@ tests/
 │       ├── CreateOrderServiceTests.cs
 │       ├── GetOrderServiceTests.cs
 │       ├── SearchOrdersServiceTests.cs
-│       └── UpdateOrderStatusServiceTests.cs
+│       ├── UpdateOrderStatusServiceTests.cs
+│       └── DeleteOrderServiceTests.cs
 └── OrderManagement.API.Tests/
     └── Auth/
         ├── OrderApiFactory.cs
-        └── AuthenticationAuthorizationTests.cs
+        ├── AuthenticationAuthorizationTests.cs
+        └── DeleteOrderAuthorizationTests.cs
 ```
 
 ## Prerequisites
@@ -239,8 +241,8 @@ Swagger UI is enabled only in Development and uses the built-in OpenAPI document
 | Item | Detail |
 |------|--------|
 | Scheme | JWT Bearer (`Authorization: Bearer <token>`) |
-| Roles | `Admin`, `User` (role claim for future Admin-only features such as delete) |
-| Order endpoints | Require authentication; **either role** may call all current order APIs |
+| Roles | `Admin`, `User` |
+| Order endpoints | Create/Get/Search/Status: any authenticated role; **Delete: Admin only** |
 | Identity / refresh tokens | Not implemented |
 
 #### Endpoint permissions
@@ -251,9 +253,10 @@ Swagger UI is enabled only in Development and uses the built-in OpenAPI document
 | `GET` | `/api/orders/{id}` | Authenticated (`Admin` or `User`) |
 | `GET` | `/api/orders` | Authenticated (`Admin` or `User`) |
 | `PATCH` | `/api/orders/{id}/status` | Authenticated (`Admin` or `User`) |
+| `DELETE` | `/api/orders/{id}` | Authenticated **`Admin` only** (User → **403**) |
 | `POST` | `/api/dev/tokens` | Anonymous; **Development only** (404 otherwise) |
 
-Unauthenticated calls to order endpoints return **401 Unauthorized**.
+Unauthenticated calls to order endpoints return **401 Unauthorized**. Authenticated Users calling delete receive **403 Forbidden**.
 
 #### Development test tokens — `POST /api/dev/tokens`
 
@@ -300,6 +303,7 @@ Then call orders with `Authorization: Bearer <accessToken>`, or paste the token 
 | `GET` | `/api/orders/{id}` | Get a single order by ID (includes line items); requires auth |
 | `GET` | `/api/orders` | Search orders with optional filters and pagination; requires auth |
 | `PATCH` | `/api/orders/{id}/status` | Advance order status (inventory deducted on confirm); requires auth |
+| `DELETE` | `/api/orders/{id}` | Delete order (Admin only); may restore inventory |
 | `POST` | `/api/dev/tokens` | Development: issue test JWT (`Admin` or `User`) |
 
 #### Create order — `POST /api/orders`
@@ -438,12 +442,54 @@ Content-Type: application/json
 { "status": "Confirmed" }
 ```
 
+#### Delete order — `DELETE /api/orders/{id}`
+
+Admin only. Permanently removes the order and cascaded line items.
+
+| Order status | Inventory |
+|--------------|-----------|
+| `Pending` | Unchanged (stock was never deducted) |
+| `Confirmed` / `Shipped` / `Delivered` | Quantities for all lines restored in the same DB transaction, then delete |
+
+```mermaid
+flowchart TD
+  Client[Admin DELETE /api/orders/id]
+  Auth{"Role Admin?"}
+  Svc[DeleteOrderService]
+  Persist[DeleteOrderAsync TX]
+  Pending{"Status Pending?"}
+  Restock[Restore inventory per product]
+  Del[Delete order cascade items]
+  Client --> Auth
+  Auth -->|no| Forbidden[403]
+  Auth -->|yes| Svc
+  Svc --> Persist
+  Persist --> Pending
+  Pending -->|yes| Del
+  Pending -->|no| Restock --> Del
+```
+
+| Status | When |
+|--------|------|
+| **204 No Content** | Order deleted |
+| **401 Unauthorized** | Missing or invalid bearer token |
+| **403 Forbidden** | Authenticated but not Admin |
+| **404 Not Found** | Order not found; body `{ "error": "..." }` |
+| **409 Conflict** | Inventory restore conflict during delete; body `{ "error": "..." }` |
+
+**Example:**
+
+```http
+DELETE /api/orders/{orderId}
+Authorization: Bearer <admin-access-token>
+```
+
 ## Testing
 
 | Project | Coverage |
 |---------|----------|
-| `tests/OrderManagement.Application.Tests` | Application services (xUnit + Moq; `IOrderPersistence` mocked) |
-| `tests/OrderManagement.API.Tests` | JWT auth: 401 without token, Admin/User can reach orders, Dev token create/validation |
+| `tests/OrderManagement.Application.Tests` | Application services (xUnit + Moq; `IOrderPersistence` mocked), including delete outcomes |
+| `tests/OrderManagement.API.Tests` | JWT auth; delete Admin-only (401/403/204/404); Dev token create/validation |
 
 API auth tests use `WebApplicationFactory` with an in-memory `Jwt:Key` and a stubbed `IOrderPersistence` (no SQL Server required for those cases).
 
