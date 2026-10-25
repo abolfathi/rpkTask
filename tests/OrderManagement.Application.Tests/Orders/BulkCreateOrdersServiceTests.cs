@@ -31,6 +31,35 @@ public sealed class BulkCreateOrdersServiceTests
     }
 
     [Fact]
+    public async Task CreateAsync_ExceedsMaxBatchSize_ReturnsValidationError()
+    {
+        var productId = Guid.NewGuid();
+        var orders = Enumerable.Range(0, BulkCreateOrdersService.MaxBulkOrderCount + 1)
+            .Select(_ => new CreateOrderRequest
+            {
+                CustomerId = Guid.NewGuid(),
+                Items = [new CreateOrderItemRequest { ProductId = productId, Quantity = 1 }]
+            })
+            .ToList();
+
+        var result = await _sut.CreateAsync(new BulkCreateOrdersRequest { Orders = orders });
+
+        Assert.Equal(CreateOrderErrorKind.Validation, result.ErrorKind);
+        Assert.Contains(
+            result.Errors,
+            e => e.Index == -1 && e.Error.Contains("maximum of", StringComparison.OrdinalIgnoreCase));
+        _persistence.Verify(
+            p => p.SaveOrdersAsync(It.IsAny<IReadOnlyList<Order>>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+        _persistence.Verify(
+            p => p.GetExistingCustomerIdsAsync(It.IsAny<IReadOnlyCollection<Guid>>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+        _persistence.Verify(
+            p => p.GetProductPricesAsync(It.IsAny<IReadOnlyCollection<Guid>>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
     public async Task CreateAsync_EmptyItems_ReturnsIndexedValidationError()
     {
         var result = await _sut.CreateAsync(new BulkCreateOrdersRequest

@@ -26,7 +26,7 @@
 | EF Core persistence | **Implemented** | `AppDbContext`, Fluent API configurations; migrations `InitialCreate`, `AddOrderSoftDelete`, `AddOrderSearchIndexes` |
 | Development seeding | **Implemented** | Bogus-based `DevelopmentDataSeeder` via `UseSeeding` / `UseAsyncSeeding` (Development only) |
 | Create-order use case | **Implemented** | `CreateOrderService` + `IOrderPersistence`; creates `Pending` order; prices from DB; no inventory check/deduct on create |
-| Bulk create orders | **Implemented** | `BulkCreateOrdersService`; `POST /api/orders/bulk`; all-or-nothing; `EFCore.BulkExtensions` transactional inserts |
+| Bulk create orders | **Implemented** | `BulkCreateOrdersService`; `POST /api/orders/bulk`; max 100 orders; all-or-nothing; `EFCore.BulkExtensions` transactional inserts |
 | Get order by ID | **Implemented** | `GetOrderService`; `GET /api/orders/{id}` |
 | Search orders | **Implemented** | `SearchOrdersService`; filters, pagination, sort by `CreatedAt` desc then `Id` desc; filtered search indexes |
 | Status transitions | **Implemented** | `UpdateOrderStatusService`; `PATCH /api/orders/{id}/status`; forward-only `Pending → Confirmed → Shipped → Delivered` |
@@ -340,7 +340,7 @@ Unit prices come from current `Product.Price`; inventory is not checked or updat
 
 #### Bulk create orders — `POST /api/orders/bulk`
 
-Creates multiple orders in one request. Each order uses the same rules as single create (items, quantities, unique product IDs per order, customer/product existence, DB prices, `Pending`, no inventory change). Validation runs for the whole batch first; **either all orders are saved or none are**. Customer and product lookups are batched. Persistence uses **EFCore.BulkExtensions** (`BulkInsertAsync` for Orders then OrderItems) inside a single SQL transaction with full rollback on failure.
+Creates multiple orders in one request (**maximum 100 orders**). Each order uses the same rules as single create (items, quantities, unique product IDs per order, customer/product existence, DB prices, `Pending`, no inventory change). Validation runs for the whole batch first; **either all orders are saved or none are**. Customer and product lookups are batched. Persistence uses **EFCore.BulkExtensions** (`BulkInsertAsync` for Orders then OrderItems) inside a single SQL transaction with full rollback on failure.
 
 **Request body:**
 
@@ -366,7 +366,7 @@ Creates multiple orders in one request. Each order uses the same rules as single
 | Status | When |
 |--------|------|
 | **201 Created** | All orders valid and saved; body `{ "orders": [ ... ] }` (same shape as single create, in request order) |
-| **400 Bad Request** | Empty batch or any order fails item validation; body `{ "errors": [ { "index": 0, "error": "..." } ] }` (all issues collected; prefers 400 if any validation error is present) |
+| **400 Bad Request** | Empty batch, more than 100 orders, or any order fails item validation; body `{ "errors": [ { "index": 0, "error": "..." } ] }` (all issues collected; prefers 400 if any validation error is present) |
 | **401 Unauthorized** | Missing or invalid bearer token |
 | **404 Not Found** | Only missing customer/product issues; same indexed `errors` body |
 

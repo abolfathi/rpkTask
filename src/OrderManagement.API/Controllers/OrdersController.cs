@@ -169,9 +169,9 @@ public sealed class OrdersController : ControllerBase
     [HttpPost("bulk")]
     [EndpointSummary("Bulk create orders")]
     [EndpointDescription(
-        "Creates multiple orders atomically via EFCore.BulkExtensions. Each order uses the same rules as single create: " +
-        "existing customer, valid quantities, unique product IDs per order, prices from the database, " +
-        "Pending status, no inventory change. If any order is invalid, none are saved. " +
+        "Creates multiple orders atomically via EFCore.BulkExtensions (maximum 100 orders per request). " +
+        "Each order uses the same rules as single create: existing customer, valid quantities, unique product IDs per order, " +
+        "prices from the database, Pending status, no inventory change. If any order is invalid, none are saved. " +
         "Requires authentication (Admin or User).")]
     [ProducesResponseType(typeof(BulkCreateOrdersResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]

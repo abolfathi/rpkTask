@@ -5,6 +5,8 @@ namespace OrderManagement.Application.Orders;
 
 public sealed class BulkCreateOrdersService
 {
+    public const int MaxBulkOrderCount = 100;
+
     private readonly IOrderPersistence _persistence;
 
     public BulkCreateOrdersService(IOrderPersistence persistence)
@@ -21,6 +23,19 @@ public sealed class BulkCreateOrdersService
             return BulkCreateOrdersResult.Failure(
                 CreateOrderErrorKind.Validation,
                 [new BulkCreateOrderError { Index = -1, Error = "At least one order is required." }]);
+        }
+
+        if (request.Orders.Count > MaxBulkOrderCount)
+        {
+            return BulkCreateOrdersResult.Failure(
+                CreateOrderErrorKind.Validation,
+                [
+                    new BulkCreateOrderError
+                    {
+                        Index = -1,
+                        Error = $"A maximum of {MaxBulkOrderCount} orders is allowed per request."
+                    }
+                ]);
         }
 
         var errors = new List<BulkCreateOrderError>();
@@ -155,5 +170,6 @@ public sealed class BulkCreateOrdersService
         error.Error.Contains("must contain", StringComparison.Ordinal)
         || error.Error.Contains("quantities", StringComparison.Ordinal)
         || error.Error.Contains("Duplicate", StringComparison.Ordinal)
-        || error.Error.Contains("At least one order", StringComparison.Ordinal);
+        || error.Error.Contains("At least one order", StringComparison.Ordinal)
+        || error.Error.Contains("maximum of", StringComparison.Ordinal);
 }
