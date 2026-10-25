@@ -7,11 +7,17 @@ public interface IOrderPersistence
 {
     Task<bool> CustomerExistsAsync(Guid customerId, CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<Guid>> GetExistingCustomerIdsAsync(
+        IReadOnlyCollection<Guid> customerIds,
+        CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<ProductPrice>> GetProductPricesAsync(
         IReadOnlyCollection<Guid> productIds,
         CancellationToken cancellationToken = default);
 
     Task SaveOrderAsync(Order order, CancellationToken cancellationToken = default);
+
+    Task SaveOrdersAsync(IReadOnlyList<Order> orders, CancellationToken cancellationToken = default);
 
     Task<Order?> GetOrderByIdAsync(Guid orderId, CancellationToken cancellationToken = default);
 

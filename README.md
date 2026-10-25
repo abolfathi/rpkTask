@@ -9,6 +9,7 @@
 | .NET | 10.0 (`net10.0`) |
 | ASP.NET Core | Web API host (`OrderManagement.API`) |
 | Entity Framework Core | 10.0.13 (SQL Server provider) |
+| EFCore.BulkExtensions | 10.0.1 (bulk order insert) |
 | Bogus | 35.6.5 (Development seed data) |
 | OpenAPI | `Microsoft.AspNetCore.OpenApi` 10.0.9 |
 | Swagger UI | `Swashbuckle.AspNetCore.SwaggerUI` (Development; consumes `/openapi/v1.json`; Bearer authorize) |
@@ -25,6 +26,7 @@
 | EF Core persistence | **Implemented** | `AppDbContext`, Fluent API configurations; migrations `InitialCreate`, `AddOrderSoftDelete` |
 | Development seeding | **Implemented** | Bogus-based `DevelopmentDataSeeder` via `UseSeeding` / `UseAsyncSeeding` (Development only) |
 | Create-order use case | **Implemented** | `CreateOrderService` + `IOrderPersistence`; creates `Pending` order; prices from DB; no inventory check/deduct on create |
+| Bulk create orders | **Implemented** | `BulkCreateOrdersService`; `POST /api/orders/bulk`; all-or-nothing; `EFCore.BulkExtensions` transactional inserts |
 | Get order by ID | **Implemented** | `GetOrderService`; `GET /api/orders/{id}` |
 | Search orders | **Implemented** | `SearchOrdersService`; filters, pagination, sort by `CreatedAt` desc then `Id` desc |
 | Status transitions | **Implemented** | `UpdateOrderStatusService`; `PATCH /api/orders/{id}/status`; forward-only `Pending → Confirmed → Shipped → Delivered` |
@@ -32,7 +34,7 @@
 | Order deletion | **Implemented** | Soft delete (`IsDeleted`/`DeletedAt`); Admin only; Pending/Confirmed; global filter hides deleted from Get/Search; Shipped/Delivered → 409 |
 | Authentication / authorization | **Implemented** | JWT Bearer; roles `Admin` and `User`; order read/write require any authenticated role; delete requires `Admin` |
 | Structured logging | **Implemented** | Serilog on the API host; Console + rolling File; HTTP request logging |
-| Unit tests | **Implemented** | xUnit + Moq for create, get, search, and status-update application services |
+| Unit tests | **Implemented** | xUnit + Moq for create, bulk create, get, search, status-update, and delete application services |
 | API auth tests | **Implemented** | `OrderManagement.API.Tests` — 401 without token, Admin/User access, Dev token endpoint |
 
 ## Clean Architecture
@@ -42,8 +44,8 @@ The solution follows Clean Architecture layering. Dependencies point **inward** 
 | Layer | Project | Responsibility |
 |-------|---------|----------------|
 | Presentation | `OrderManagement.API` | ASP.NET Core host, JWT auth, Serilog, `OrdersController`, Dev token endpoint |
-| Infrastructure | `OrderManagement.Infrastructure` | EF Core, SQL Server, migrations, Development seeding, `OrderPersistence` |
-| Application | `OrderManagement.Application` | Order use cases (create/get/search/status/delete), DTOs/results, `IOrderPersistence` port |
+| Infrastructure | `OrderManagement.Infrastructure` | EF Core, SQL Server, EFCore.BulkExtensions, migrations, Development seeding, `OrderPersistence` |
+| Application | `OrderManagement.Application` | Order use cases (create/bulk/get/search/status/delete), DTOs/results, `IOrderPersistence` port |
 | Domain | `OrderManagement.Domain` | Entities, enums, status transition policy |
 
 ```mermaid
@@ -83,7 +85,7 @@ src/
 │   └── appsettings.Development.json
 ├── OrderManagement.Application/
 │   ├── DependencyInjection.cs
-│   └── Orders/                      # Create/Get/Search/Status/Delete services, DTOs, IOrderPersistence
+│   └── Orders/                      # Create/BulkCreate/Get/Search/Status/Delete services, DTOs, IOrderPersistence
 ├── OrderManagement.Domain/
 │   ├── Entities/
 │   ├── Enums/
@@ -100,10 +102,15 @@ tests/
 ├── OrderManagement.Application.Tests/
 │   └── Orders/
 │       ├── CreateOrderServiceTests.cs
+│       ├── BulkCreateOrdersServiceTests.cs
 │       ├── GetOrderServiceTests.cs
 │       ├── SearchOrdersServiceTests.cs
 │       ├── UpdateOrderStatusServiceTests.cs
 │       └── DeleteOrderServiceTests.cs
+├── OrderManagement.Infrastructure.Tests/
+│   └── Persistence/
+│       ├── DeleteOrderPersistenceTests.cs
+│       └── SaveOrdersPersistenceTests.cs
 └── OrderManagement.API.Tests/
     └── Auth/
         ├── OrderApiFactory.cs
@@ -242,7 +249,7 @@ Swagger UI is enabled only in Development and uses the built-in OpenAPI document
 |------|--------|
 | Scheme | JWT Bearer (`Authorization: Bearer <token>`) |
 | Roles | `Admin`, `User` |
-| Order endpoints | Create/Get/Search/Status: any authenticated role; **Delete: Admin only** |
+| Order endpoints | Create/Bulk create/Get/Search/Status: any authenticated role; **Delete: Admin only** |
 | Identity / refresh tokens | Not implemented |
 
 #### Endpoint permissions
@@ -250,6 +257,7 @@ Swagger UI is enabled only in Development and uses the built-in OpenAPI document
 | Method | Route | Auth |
 |--------|-------|------|
 | `POST` | `/api/orders` | Authenticated (`Admin` or `User`) |
+| `POST` | `/api/orders/bulk` | Authenticated (`Admin` or `User`) |
 | `GET` | `/api/orders/{id}` | Authenticated (`Admin` or `User`) |
 | `GET` | `/api/orders` | Authenticated (`Admin` or `User`) |
 | `PATCH` | `/api/orders/{id}/status` | Authenticated (`Admin` or `User`) |
@@ -300,6 +308,7 @@ Then call orders with `Authorization: Bearer <accessToken>`, or paste the token 
 | Method | Route | Description |
 |--------|-------|-------------|
 | `POST` | `/api/orders` | Create a new order (`Pending`); requires auth |
+| `POST` | `/api/orders/bulk` | Create multiple orders atomically (`Pending`); requires auth |
 | `GET` | `/api/orders/{id}` | Get a single order by ID (includes line items); requires auth |
 | `GET` | `/api/orders` | Search orders with optional filters and pagination; requires auth |
 | `PATCH` | `/api/orders/{id}/status` | Advance order status (inventory deducted on confirm); requires auth |
@@ -327,6 +336,38 @@ Then call orders with `Authorization: Bearer <accessToken>`, or paste the token 
 | **404 Not Found** | Customer or product not found; body `{ "error": "..." }` |
 
 Unit prices come from current `Product.Price`; inventory is not checked or updated.
+
+#### Bulk create orders — `POST /api/orders/bulk`
+
+Creates multiple orders in one request. Each order uses the same rules as single create (items, quantities, unique product IDs per order, customer/product existence, DB prices, `Pending`, no inventory change). Validation runs for the whole batch first; **either all orders are saved or none are**. Customer and product lookups are batched. Persistence uses **EFCore.BulkExtensions** (`BulkInsertAsync` for Orders then OrderItems) inside a single SQL transaction with full rollback on failure.
+
+**Request body:**
+
+```json
+{
+  "orders": [
+    {
+      "customerId": "00000000-0000-4000-8000-000000000001",
+      "items": [
+        { "productId": "00000000-0000-4000-8001-000000000001", "quantity": 1 }
+      ]
+    },
+    {
+      "customerId": "00000000-0000-4000-8000-000000000002",
+      "items": [
+        { "productId": "00000000-0000-4000-8001-000000000002", "quantity": 2 }
+      ]
+    }
+  ]
+}
+```
+
+| Status | When |
+|--------|------|
+| **201 Created** | All orders valid and saved; body `{ "orders": [ ... ] }` (same shape as single create, in request order) |
+| **400 Bad Request** | Empty batch or any order fails item validation; body `{ "errors": [ { "index": 0, "error": "..." } ] }` (all issues collected; prefers 400 if any validation error is present) |
+| **401 Unauthorized** | Missing or invalid bearer token |
+| **404 Not Found** | Only missing customer/product issues; same indexed `errors` body |
 
 #### Get order — `GET /api/orders/{id}`
 
@@ -494,13 +535,13 @@ Authorization: Bearer <admin-access-token>
 
 | Project | Coverage |
 |---------|----------|
-| `tests/OrderManagement.Application.Tests` | Application services (xUnit + Moq; `IOrderPersistence` mocked), including delete outcomes |
+| `tests/OrderManagement.Application.Tests` | Application services (xUnit + Moq; `IOrderPersistence` mocked), including create, bulk create, and delete outcomes |
 | `tests/OrderManagement.API.Tests` | JWT auth; delete Admin-only (401/403/204/404); Dev token create/validation |
-| `tests/OrderManagement.Infrastructure.Tests` | Soft-delete persistence against SQL Server LocalDB (`OrderPersistence`) |
+| `tests/OrderManagement.Infrastructure.Tests` | Soft-delete and bulk `SaveOrdersAsync` (success + transaction rollback) against SQL Server LocalDB |
 
 API auth tests use `WebApplicationFactory` with an in-memory `Jwt:Key` and a stubbed `IOrderPersistence` (no SQL Server required for those cases).
 
-Infrastructure soft-delete tests require **SQL Server LocalDB** (`(localdb)\mssqllocaldb`). They create and drop a unique database per test run and apply EF migrations — EF InMemory is not used.
+Infrastructure tests require **SQL Server LocalDB** (`(localdb)\mssqllocaldb`). They create and drop a unique database per test run and apply EF migrations — EF InMemory is not used.
 
 From the repository root:
 

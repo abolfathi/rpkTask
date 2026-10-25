@@ -1,3 +1,4 @@
+using EFCore.BulkExtensions;
 using Microsoft.EntityFrameworkCore;
 using OrderManagement.Application.Orders;
 using OrderManagement.Domain.Entities;
@@ -19,6 +20,22 @@ public sealed class OrderPersistence : IOrderPersistence
         return _dbContext.Customers.AnyAsync(c => c.Id == customerId, cancellationToken);
     }
 
+    public async Task<IReadOnlyList<Guid>> GetExistingCustomerIdsAsync(
+        IReadOnlyCollection<Guid> customerIds,
+        CancellationToken cancellationToken = default)
+    {
+        if (customerIds.Count == 0)
+        {
+            return [];
+        }
+
+        return await _dbContext.Customers
+            .AsNoTracking()
+            .Where(c => customerIds.Contains(c.Id))
+            .Select(c => c.Id)
+            .ToListAsync(cancellationToken);
+    }
+
     public async Task<IReadOnlyList<ProductPrice>> GetProductPricesAsync(
         IReadOnlyCollection<Guid> productIds,
         CancellationToken cancellationToken = default)
@@ -34,6 +51,35 @@ public sealed class OrderPersistence : IOrderPersistence
     {
         _dbContext.Orders.Add(order);
         await _dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task SaveOrdersAsync(IReadOnlyList<Order> orders, CancellationToken cancellationToken = default)
+    {
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            // CheckConstraints so FK violations fail inside the transaction (SqlBulkCopy default skips them).
+            var bulkConfig = new BulkConfig
+            {
+                SqlBulkCopyOptions = SqlBulkCopyOptions.CheckConstraints
+            };
+
+            var orderList = orders.ToList();
+            await _dbContext.BulkInsertAsync(orderList, bulkConfig, cancellationToken: cancellationToken);
+
+            var items = orderList.SelectMany(o => o.Items).ToList();
+            if (items.Count > 0)
+            {
+                await _dbContext.BulkInsertAsync(items, bulkConfig, cancellationToken: cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
     }
 
     public async Task<Order?> GetOrderByIdAsync(Guid orderId, CancellationToken cancellationToken = default)

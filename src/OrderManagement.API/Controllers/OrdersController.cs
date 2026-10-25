@@ -12,6 +12,7 @@ namespace OrderManagement.API.Controllers;
 public sealed class OrdersController : ControllerBase
 {
     private readonly CreateOrderService _createOrderService;
+    private readonly BulkCreateOrdersService _bulkCreateOrdersService;
     private readonly GetOrderService _getOrderService;
     private readonly SearchOrdersService _searchOrdersService;
     private readonly UpdateOrderStatusService _updateOrderStatusService;
@@ -19,12 +20,14 @@ public sealed class OrdersController : ControllerBase
 
     public OrdersController(
         CreateOrderService createOrderService,
+        BulkCreateOrdersService bulkCreateOrdersService,
         GetOrderService getOrderService,
         SearchOrdersService searchOrdersService,
         UpdateOrderStatusService updateOrderStatusService,
         DeleteOrderService deleteOrderService)
     {
         _createOrderService = createOrderService;
+        _bulkCreateOrdersService = bulkCreateOrdersService;
         _getOrderService = getOrderService;
         _searchOrdersService = searchOrdersService;
         _updateOrderStatusService = updateOrderStatusService;
@@ -155,6 +158,36 @@ public sealed class OrdersController : ControllerBase
                 result.Response),
             CreateOrderErrorKind.Validation => BadRequest(new { error = result.ErrorMessage }),
             CreateOrderErrorKind.NotFound => NotFound(new { error = result.ErrorMessage }),
+            _ => Problem(statusCode: StatusCodes.Status500InternalServerError)
+        };
+    }
+
+    /// <summary>
+    /// Creates multiple orders in Pending status in one request.
+    /// </summary>
+    [HttpPost("bulk")]
+    [EndpointSummary("Bulk create orders")]
+    [EndpointDescription(
+        "Creates multiple orders atomically via EFCore.BulkExtensions. Each order uses the same rules as single create: " +
+        "existing customer, valid quantities, unique product IDs per order, prices from the database, " +
+        "Pending status, no inventory change. If any order is invalid, none are saved. " +
+        "Requires authentication (Admin or User).")]
+    [ProducesResponseType(typeof(BulkCreateOrdersResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> BulkCreate(
+        [FromBody] BulkCreateOrdersRequest request,
+        CancellationToken cancellationToken)
+    {
+        var result = await _bulkCreateOrdersService.CreateAsync(request, cancellationToken);
+
+        return result.ErrorKind switch
+        {
+            CreateOrderErrorKind.None => StatusCode(StatusCodes.Status201Created, result.Response),
+            CreateOrderErrorKind.Validation => BadRequest(new { errors = result.Errors }),
+            CreateOrderErrorKind.NotFound => NotFound(new { errors = result.Errors }),
             _ => Problem(statusCode: StatusCodes.Status500InternalServerError)
         };
     }
