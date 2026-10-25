@@ -1,6 +1,6 @@
 # Order Management
 
-.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create/get/search orders, and status transitions (including inventory deduct on confirm) are implemented. Deletion and authentication are not implemented.
+.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create/get/search orders, status transitions (including inventory deduct on confirm), and JWT Bearer authentication are implemented. Order deletion is not implemented (planned later as Admin-only).
 
 ## Tech stack
 
@@ -11,8 +11,9 @@
 | Entity Framework Core | 10.0.13 (SQL Server provider) |
 | Bogus | 35.6.5 (Development seed data) |
 | OpenAPI | `Microsoft.AspNetCore.OpenApi` 10.0.9 |
-| Swagger UI | `Swashbuckle.AspNetCore.SwaggerUI` (Development; consumes `/openapi/v1.json`) |
-| xUnit / Moq | Unit tests (`OrderManagement.Application.Tests`) |
+| Swagger UI | `Swashbuckle.AspNetCore.SwaggerUI` (Development; consumes `/openapi/v1.json`; Bearer authorize) |
+| JWT Bearer | `Microsoft.AspNetCore.Authentication.JwtBearer` 10.0.9 |
+| xUnit / Moq | Application unit tests; API auth tests (`Microsoft.AspNetCore.Mvc.Testing`) |
 | Database (Development) | SQL Server LocalDB (`OrderManagement`) |
 
 ## Implementation status
@@ -27,10 +28,10 @@
 | Search orders | **Implemented** | `SearchOrdersService`; filters, pagination, sort by `CreatedAt` desc then `Id` desc |
 | Status transitions | **Implemented** | `UpdateOrderStatusService`; `PATCH /api/orders/{id}/status`; forward-only `Pending → Confirmed → Shipped → Delivered` |
 | Inventory on confirm | **Implemented** | Confirm validates stock for all lines and deducts atomically in a DB transaction |
-| Order deletion | **Not present** | No delete endpoint |
-| Authentication / authorization policies | **Not present** | Pipeline calls `UseAuthorization()`; no auth configuration or policies |
+| Order deletion | **Not present** | No delete endpoint (future: Admin-only) |
+| Authentication / authorization | **Implemented** | JWT Bearer; roles `Admin` and `User`; all current order endpoints require any authenticated role (`[Authorize]`) |
 | Unit tests | **Implemented** | xUnit + Moq for create, get, search, and status-update application services |
-| API / integration tests | **Not present** | No test project for the API host |
+| API auth tests | **Implemented** | `OrderManagement.API.Tests` — 401 without token, Admin/User access, Dev token endpoint |
 
 ## Clean Architecture
 
@@ -38,7 +39,7 @@ The solution follows Clean Architecture layering. Dependencies point **inward** 
 
 | Layer | Project | Responsibility |
 |-------|---------|----------------|
-| Presentation | `OrderManagement.API` | ASP.NET Core host, HTTP pipeline, `OrdersController` |
+| Presentation | `OrderManagement.API` | ASP.NET Core host, JWT auth, `OrdersController`, Dev token endpoint |
 | Infrastructure | `OrderManagement.Infrastructure` | EF Core, SQL Server, migrations, Development seeding, `OrderPersistence` |
 | Application | `OrderManagement.Application` | Order use cases (create/get/search/status), DTOs/results, `IOrderPersistence` port |
 | Domain | `OrderManagement.Domain` | Entities, enums, status transition policy |
@@ -70,8 +71,11 @@ flowchart TB
 OrderManagement.sln
 src/
 ├── OrderManagement.API/
+│   ├── Auth/                        # JwtOptions, token service, roles
 │   ├── Controllers/
-│   │   └── OrdersController.cs
+│   │   ├── OrdersController.cs
+│   │   └── DevTokensController.cs   # Development test JWTs
+│   ├── OpenApi/                     # Bearer security scheme transformers
 │   ├── Program.cs
 │   ├── appsettings.json
 │   └── appsettings.Development.json
@@ -91,12 +95,16 @@ src/
         ├── Configurations/
         └── Migrations/
 tests/
-└── OrderManagement.Application.Tests/
-    └── Orders/
-        ├── CreateOrderServiceTests.cs
-        ├── GetOrderServiceTests.cs
-        ├── SearchOrdersServiceTests.cs
-        └── UpdateOrderStatusServiceTests.cs
+├── OrderManagement.Application.Tests/
+│   └── Orders/
+│       ├── CreateOrderServiceTests.cs
+│       ├── GetOrderServiceTests.cs
+│       ├── SearchOrdersServiceTests.cs
+│       └── UpdateOrderStatusServiceTests.cs
+└── OrderManagement.API.Tests/
+    └── Auth/
+        ├── OrderApiFactory.cs
+        └── AuthenticationAuthorizationTests.cs
 ```
 
 ## Prerequisites
@@ -119,6 +127,24 @@ From the repository root:
 dotnet restore
 dotnet build
 ```
+
+### JWT signing key (required)
+
+`Jwt:Key` is **not** stored in source control. Configure it before running the API:
+
+```bash
+dotnet user-secrets set "Jwt:Key" "<at-least-32-character-secret>" --project src/OrderManagement.API
+```
+
+Or set environment variables (useful for CI / non-Dev hosts):
+
+| Variable | Purpose |
+|----------|---------|
+| `Jwt__Key` | HMAC signing key (min 32 characters) |
+| `Jwt__Issuer` | Optional override (default `OrderManagement`) |
+| `Jwt__Audience` | Optional override (default `OrderManagement`) |
+
+`appsettings.json` / `appsettings.Development.json` only contain non-secret JWT defaults (`Issuer`, `Audience`, `ExpirationMinutes`). The host fails fast at startup if `Jwt:Key` is missing or too short.
 
 ## Database: migrations and seed data
 
@@ -188,16 +214,75 @@ dotnet run --project src/OrderManagement.API --launch-profile https
 | OpenAPI document | `/openapi/v1.json` |
 | Swagger UI | `/swagger` |
 
-Swagger UI is enabled only in Development and uses the built-in OpenAPI document (no second document generator).
+Swagger UI is enabled only in Development and uses the built-in OpenAPI document (no second document generator). The OpenAPI document declares an HTTP Bearer JWT scheme. In Swagger UI, use **Authorize**, paste the access token (without the `Bearer ` prefix), then call protected endpoints. Authorization is persisted in the browser session for convenience.
+
+### Authentication and authorization
+
+| Item | Detail |
+|------|--------|
+| Scheme | JWT Bearer (`Authorization: Bearer <token>`) |
+| Roles | `Admin`, `User` (role claim for future Admin-only features such as delete) |
+| Order endpoints | Require authentication; **either role** may call all current order APIs |
+| Identity / refresh tokens | Not implemented |
+
+#### Endpoint permissions
+
+| Method | Route | Auth |
+|--------|-------|------|
+| `POST` | `/api/orders` | Authenticated (`Admin` or `User`) |
+| `GET` | `/api/orders/{id}` | Authenticated (`Admin` or `User`) |
+| `GET` | `/api/orders` | Authenticated (`Admin` or `User`) |
+| `PATCH` | `/api/orders/{id}/status` | Authenticated (`Admin` or `User`) |
+| `POST` | `/api/dev/tokens` | Anonymous; **Development only** (404 otherwise) |
+
+Unauthenticated calls to order endpoints return **401 Unauthorized**.
+
+#### Development test tokens — `POST /api/dev/tokens`
+
+Available only when `ASPNETCORE_ENVIRONMENT=Development`. Issues a signed JWT for local testing (no user store / Identity).
+
+**Request:**
+
+```json
+{
+  "role": "User",
+  "subject": "optional-subject"
+}
+```
+
+`role` must be `Admin` or `User`. `subject` is optional (defaults to `dev-user` / `dev-admin`).
+
+**Response:**
+
+```json
+{
+  "accessToken": "<jwt>",
+  "tokenType": "Bearer",
+  "expiresAt": "2026-10-25T12:00:00+00:00",
+  "role": "User"
+}
+```
+
+**Example:**
+
+```http
+POST /api/dev/tokens
+Content-Type: application/json
+
+{ "role": "Admin" }
+```
+
+Then call orders with `Authorization: Bearer <accessToken>`, or paste the token into Swagger UI Authorize.
 
 ### API endpoints
 
 | Method | Route | Description |
 |--------|-------|-------------|
-| `POST` | `/api/orders` | Create a new order (`Pending`) |
-| `GET` | `/api/orders/{id}` | Get a single order by ID (includes line items) |
-| `GET` | `/api/orders` | Search orders with optional filters and pagination |
-| `PATCH` | `/api/orders/{id}/status` | Advance order status (inventory deducted on confirm) |
+| `POST` | `/api/orders` | Create a new order (`Pending`); requires auth |
+| `GET` | `/api/orders/{id}` | Get a single order by ID (includes line items); requires auth |
+| `GET` | `/api/orders` | Search orders with optional filters and pagination; requires auth |
+| `PATCH` | `/api/orders/{id}/status` | Advance order status (inventory deducted on confirm); requires auth |
+| `POST` | `/api/dev/tokens` | Development: issue test JWT (`Admin` or `User`) |
 
 #### Create order — `POST /api/orders`
 
@@ -216,6 +301,7 @@ Swagger UI is enabled only in Development and uses the built-in OpenAPI document
 |--------|------|
 | **201 Created** | Success; body is order detail; `Location: /api/orders/{orderId}` |
 | **400 Bad Request** | Validation failure (empty items, non-positive quantity, duplicate product IDs); body `{ "error": "..." }` |
+| **401 Unauthorized** | Missing or invalid bearer token |
 | **404 Not Found** | Customer or product not found; body `{ "error": "..." }` |
 
 Unit prices come from current `Product.Price`; inventory is not checked or updated.
@@ -225,6 +311,7 @@ Unit prices come from current `Product.Price`; inventory is not checked or updat
 | Status | When |
 |--------|------|
 | **200 OK** | Order found (includes items) |
+| **401 Unauthorized** | Missing or invalid bearer token |
 | **404 Not Found** | No order with that ID; body `{ "error": "..." }` |
 
 #### Search orders — `GET /api/orders`
@@ -263,6 +350,7 @@ GET /api/orders?customerId=00000000-0000-4000-8000-000000000001&status=Pending&p
 |--------|------|
 | **200 OK** | Success (empty `items` when no matches) |
 | **400 Bad Request** | Invalid pagination or `createdFrom` > `createdTo`; body `{ "error": "..." }` |
+| **401 Unauthorized** | Missing or invalid bearer token |
 
 ```mermaid
 sequenceDiagram
@@ -319,6 +407,7 @@ Concurrency: confirm uses conditional inventory updates (`Quantity >= required`)
 |--------|------|
 | **200 OK** | Transition applied; body is order detail |
 | **400 Bad Request** | Invalid transition or invalid status value; body `{ "error": "..." }` |
+| **401 Unauthorized** | Missing or invalid bearer token |
 | **404 Not Found** | Order not found; body `{ "error": "..." }` |
 | **409 Conflict** | Insufficient inventory or concurrent modification; body `{ "error": "..." }` |
 
@@ -333,7 +422,12 @@ Content-Type: application/json
 
 ## Testing
 
-Application-layer unit tests live in `tests/OrderManagement.Application.Tests` (xUnit + Moq; `IOrderPersistence` is mocked). There are no API or integration tests.
+| Project | Coverage |
+|---------|----------|
+| `tests/OrderManagement.Application.Tests` | Application services (xUnit + Moq; `IOrderPersistence` mocked) |
+| `tests/OrderManagement.API.Tests` | JWT auth: 401 without token, Admin/User can reach orders, Dev token create/validation |
+
+API auth tests use `WebApplicationFactory` with an in-memory `Jwt:Key` and a stubbed `IOrderPersistence` (no SQL Server required for those cases).
 
 From the repository root:
 
