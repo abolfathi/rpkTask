@@ -27,7 +27,11 @@ public sealed class OrderApiFactory : WebApplicationFactory<Program>
                 ["Jwt:Key"] = TestJwtKey,
                 ["Jwt:ExpirationMinutes"] = "60",
                 ["ConnectionStrings:DefaultConnection"] =
-                    "Server=(localdb)\\mssqllocaldb;Database=OrderManagement_AuthTests;Trusted_Connection=True;TrustServerCertificate=True"
+                    "Server=(localdb)\\mssqllocaldb;Database=OrderManagement_AuthTests;Trusted_Connection=True;TrustServerCertificate=True",
+                // Quiet Serilog in tests: raise level and avoid rolling files under the repo.
+                ["Serilog:MinimumLevel:Default"] = "Warning",
+                ["Serilog:WriteTo:0:Name"] = "Console",
+                ["Serilog:WriteTo:1:Name"] = "Console"
             });
         });
 

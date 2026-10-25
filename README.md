@@ -13,6 +13,7 @@
 | OpenAPI | `Microsoft.AspNetCore.OpenApi` 10.0.9 |
 | Swagger UI | `Swashbuckle.AspNetCore.SwaggerUI` (Development; consumes `/openapi/v1.json`; Bearer authorize) |
 | JWT Bearer | `Microsoft.AspNetCore.Authentication.JwtBearer` 10.0.9 |
+| Serilog | `Serilog.AspNetCore` 10.0.0; Console + rolling File sinks |
 | xUnit / Moq | Application unit tests; API auth tests (`Microsoft.AspNetCore.Mvc.Testing`) |
 | Database (Development) | SQL Server LocalDB (`OrderManagement`) |
 
@@ -30,6 +31,7 @@
 | Inventory on confirm | **Implemented** | Confirm validates stock for all lines and deducts atomically in a DB transaction |
 | Order deletion | **Not present** | No delete endpoint (future: Admin-only) |
 | Authentication / authorization | **Implemented** | JWT Bearer; roles `Admin` and `User`; all current order endpoints require any authenticated role (`[Authorize]`) |
+| Structured logging | **Implemented** | Serilog on the API host; Console + rolling File; HTTP request logging |
 | Unit tests | **Implemented** | xUnit + Moq for create, get, search, and status-update application services |
 | API auth tests | **Implemented** | `OrderManagement.API.Tests` — 401 without token, Admin/User access, Dev token endpoint |
 
@@ -39,7 +41,7 @@ The solution follows Clean Architecture layering. Dependencies point **inward** 
 
 | Layer | Project | Responsibility |
 |-------|---------|----------------|
-| Presentation | `OrderManagement.API` | ASP.NET Core host, JWT auth, `OrdersController`, Dev token endpoint |
+| Presentation | `OrderManagement.API` | ASP.NET Core host, JWT auth, Serilog, `OrdersController`, Dev token endpoint |
 | Infrastructure | `OrderManagement.Infrastructure` | EF Core, SQL Server, migrations, Development seeding, `OrderPersistence` |
 | Application | `OrderManagement.Application` | Order use cases (create/get/search/status), DTOs/results, `IOrderPersistence` port |
 | Domain | `OrderManagement.Domain` | Entities, enums, status transition policy |
@@ -145,6 +147,22 @@ Or set environment variables (useful for CI / non-Dev hosts):
 | `Jwt__Audience` | Optional override (default `OrderManagement`) |
 
 `appsettings.json` / `appsettings.Development.json` only contain non-secret JWT defaults (`Issuer`, `Audience`, `ExpirationMinutes`). The host fails fast at startup if `Jwt:Key` is missing or too short.
+
+### Logging (Serilog)
+
+The API host uses **Serilog** (not Application/Infrastructure packages):
+
+| Sink | Details |
+|------|---------|
+| Console | Timestamp, level, source context, message, exception |
+| File | `Logs/order-management-.log`, daily rolling, 14 files retained (`Logs/` is gitignored) |
+
+| Environment | Default level | Notes |
+|-------------|---------------|-------|
+| Base / Production-oriented | `Information` | `Microsoft.AspNetCore` and `Microsoft.EntityFrameworkCore` overridden to `Warning` |
+| Development | `Debug` | Same AspNetCore/EF overrides |
+
+HTTP requests are logged once via `UseSerilogRequestLogging` (method, path, status, elapsed, optional `RequestId`). Request/response bodies, Authorization headers, JWT keys, and connection strings are not logged. Startup failures use `Log.Fatal`; there is no separate exception middleware that changes HTTP responses.
 
 ## Database: migrations and seed data
 
