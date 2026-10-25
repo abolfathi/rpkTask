@@ -180,7 +180,7 @@ public sealed class OrderPersistence : IOrderPersistence
             }
 
             var orderAffected = await _dbContext.Orders
-                .Where(o => o.Id == orderId && o.Status == OrderStatus.Pending)
+                .Where(o => o.Id == orderId && o.Status == OrderStatus.Pending && !o.IsDeleted)
                 .ExecuteUpdateAsync(
                     setters => setters
                         .SetProperty(o => o.Status, OrderStatus.Confirmed)
@@ -221,7 +221,7 @@ public sealed class OrderPersistence : IOrderPersistence
     {
         var now = DateTimeOffset.UtcNow;
         var affected = await _dbContext.Orders
-            .Where(o => o.Id == orderId && o.Status == expectedCurrent)
+            .Where(o => o.Id == orderId && o.Status == expectedCurrent && !o.IsDeleted)
             .ExecuteUpdateAsync(
                 setters => setters
                     .SetProperty(o => o.Status, next)
@@ -257,13 +257,20 @@ public sealed class OrderPersistence : IOrderPersistence
                     $"Orders with status '{order.Status}' cannot be deleted.");
             }
 
+            var now = DateTimeOffset.UtcNow;
+
             if (order.Status == OrderStatus.Pending)
             {
-                var deleted = await _dbContext.Orders
-                    .Where(o => o.Id == orderId && o.Status == OrderStatus.Pending)
-                    .ExecuteDeleteAsync(cancellationToken);
+                var softDeleted = await _dbContext.Orders
+                    .Where(o => o.Id == orderId && o.Status == OrderStatus.Pending && !o.IsDeleted)
+                    .ExecuteUpdateAsync(
+                        setters => setters
+                            .SetProperty(o => o.IsDeleted, true)
+                            .SetProperty(o => o.DeletedAt, now)
+                            .SetProperty(o => o.UpdatedAt, now),
+                        cancellationToken);
 
-                if (deleted != 1)
+                if (softDeleted != 1)
                 {
                     await transaction.RollbackAsync(cancellationToken);
                     return DeleteOrderOutcome.ConcurrentConflict(
@@ -274,25 +281,29 @@ public sealed class OrderPersistence : IOrderPersistence
                 return DeleteOrderOutcome.Success();
             }
 
-            // Confirmed: delete only while still Confirmed, then restore inventory in the same TX.
+            // Confirmed: soft-delete while still Confirmed, then restore inventory in the same TX.
             var requiredByProduct = order.Items
                 .GroupBy(i => i.ProductId)
                 .OrderBy(g => g.Key)
                 .Select(g => (ProductId: g.Key, Quantity: g.Sum(i => i.Quantity)))
                 .ToList();
 
-            var deletedConfirmed = await _dbContext.Orders
-                .Where(o => o.Id == orderId && o.Status == OrderStatus.Confirmed)
-                .ExecuteDeleteAsync(cancellationToken);
+            var softDeletedConfirmed = await _dbContext.Orders
+                .Where(o => o.Id == orderId && o.Status == OrderStatus.Confirmed && !o.IsDeleted)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(o => o.IsDeleted, true)
+                        .SetProperty(o => o.DeletedAt, now)
+                        .SetProperty(o => o.UpdatedAt, now),
+                    cancellationToken);
 
-            if (deletedConfirmed != 1)
+            if (softDeletedConfirmed != 1)
             {
                 await transaction.RollbackAsync(cancellationToken);
                 return DeleteOrderOutcome.ConcurrentConflict(
                     "The order was modified by another request during delete. Try again.");
             }
 
-            var now = DateTimeOffset.UtcNow;
             foreach (var (productId, restoreQty) in requiredByProduct)
             {
                 var affected = await _dbContext.Inventories

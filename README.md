@@ -1,6 +1,6 @@
 # Order Management
 
-.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create/get/search/delete orders, status transitions (including inventory deduct on confirm), JWT Bearer authentication, and Serilog logging are implemented. Order deletion is Admin-only: Pending deletes without inventory change, Confirmed restores stock then deletes, and Shipped/Delivered are rejected.
+.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create/get/search/delete orders, status transitions (including inventory deduct on confirm), JWT Bearer authentication, and Serilog logging are implemented. Order deletion is Admin-only soft delete: Pending marks deleted without inventory change, Confirmed restores stock then marks deleted, and Shipped/Delivered are rejected.
 
 ## Tech stack
 
@@ -22,14 +22,14 @@
 | Area | Status | Details |
 |------|--------|---------|
 | Domain model | **Implemented** | `Customer`, `Product`, `Inventory`, `Order`, `OrderItem`; `OrderStatus` enum (`Pending`, `Confirmed`, `Shipped`, `Delivered`) |
-| EF Core persistence | **Implemented** | `AppDbContext`, Fluent API configurations, `InitialCreate` migration |
+| EF Core persistence | **Implemented** | `AppDbContext`, Fluent API configurations; migrations `InitialCreate`, `AddOrderSoftDelete` |
 | Development seeding | **Implemented** | Bogus-based `DevelopmentDataSeeder` via `UseSeeding` / `UseAsyncSeeding` (Development only) |
 | Create-order use case | **Implemented** | `CreateOrderService` + `IOrderPersistence`; creates `Pending` order; prices from DB; no inventory check/deduct on create |
 | Get order by ID | **Implemented** | `GetOrderService`; `GET /api/orders/{id}` |
 | Search orders | **Implemented** | `SearchOrdersService`; filters, pagination, sort by `CreatedAt` desc then `Id` desc |
 | Status transitions | **Implemented** | `UpdateOrderStatusService`; `PATCH /api/orders/{id}/status`; forward-only `Pending → Confirmed → Shipped → Delivered` |
 | Inventory on confirm | **Implemented** | Confirm validates stock for all lines and deducts atomically in a DB transaction |
-| Order deletion | **Implemented** | `DELETE /api/orders/{id}`; Admin only; Pending (no inventory) or Confirmed (restore then delete); Shipped/Delivered → 409 |
+| Order deletion | **Implemented** | Soft delete (`IsDeleted`/`DeletedAt`); Admin only; Pending/Confirmed; global filter hides deleted from Get/Search; Shipped/Delivered → 409 |
 | Authentication / authorization | **Implemented** | JWT Bearer; roles `Admin` and `User`; order read/write require any authenticated role; delete requires `Admin` |
 | Structured logging | **Implemented** | Serilog on the API host; Console + rolling File; HTTP request logging |
 | Unit tests | **Implemented** | xUnit + Moq for create, get, search, and status-update application services |
@@ -188,7 +188,7 @@ dotnet ef database update --project src/OrderManagement.Infrastructure --startup
 
 This command:
 
-1. Applies pending EF Core migrations (currently `InitialCreate`)
+1. Applies pending EF Core migrations (`InitialCreate`, `AddOrderSoftDelete`, …)
 2. In the Development environment, executes the `UseSeeding` / `UseAsyncSeeding` callbacks registered in Infrastructure DI, which call `DevelopmentDataSeeder`
 
 Seeding is registered **only** when the host environment is Development.
@@ -303,7 +303,7 @@ Then call orders with `Authorization: Bearer <accessToken>`, or paste the token 
 | `GET` | `/api/orders/{id}` | Get a single order by ID (includes line items); requires auth |
 | `GET` | `/api/orders` | Search orders with optional filters and pagination; requires auth |
 | `PATCH` | `/api/orders/{id}/status` | Advance order status (inventory deducted on confirm); requires auth |
-| `DELETE` | `/api/orders/{id}` | Delete Pending/Confirmed (Admin only); Shipped/Delivered → 409 |
+| `DELETE` | `/api/orders/{id}` | Soft-delete Pending/Confirmed (Admin only); Shipped/Delivered → 409 |
 | `POST` | `/api/dev/tokens` | Development: issue test JWT (`Admin` or `User`) |
 
 #### Create order — `POST /api/orders`
@@ -444,16 +444,16 @@ Content-Type: application/json
 
 #### Delete order — `DELETE /api/orders/{id}`
 
-Admin only. Permanently removes the order and cascaded line items when allowed.
+Admin only. **Soft deletes** the order (`IsDeleted = true`, `DeletedAt` set). The order row and line items are retained for history. Soft-deleted orders are excluded from Get/Search (and normal status flows) by an EF Core global query filter (`!IsDeleted`). A second delete of the same id returns **404**.
 
 | Order status | Allowed? | Inventory |
 |--------------|----------|-----------|
 | `Pending` | Yes | Unchanged (stock was never deducted) |
-| `Confirmed` | Yes | Quantities restored in the same DB transaction after a status-conditional delete |
+| `Confirmed` | Yes | Soft-delete then restore quantities in the same DB transaction |
 | `Shipped` | No | Unchanged |
 | `Delivered` | No | Unchanged |
 
-Deletion uses a transaction and conditional `ExecuteDelete` (`Status` still `Pending` or `Confirmed`) so a concurrent status change cannot silently delete the wrong state. Failed inventory restore rolls back the delete.
+Soft-delete uses a transaction and conditional `ExecuteUpdate` (`Status` still `Pending` or `Confirmed` and `IsDeleted == false`). Concurrent status/delete races yield **409**. Failed inventory restore rolls back the soft-delete.
 
 ```mermaid
 flowchart TD
@@ -461,8 +461,8 @@ flowchart TD
   Auth{"Role Admin?"}
   Load[Load order in TX]
   Status{Status?}
-  DelPending[ExecuteDelete Status Pending]
-  DelConfirmed[ExecuteDelete Status Confirmed]
+  SoftPending[ExecuteUpdate soft-delete Status Pending]
+  SoftConfirmed[ExecuteUpdate soft-delete Status Confirmed]
   Restock[Restore inventory]
   Conflict409[409 no side effects]
   Ok204[204]
@@ -470,17 +470,17 @@ flowchart TD
   Auth -->|no| Forbidden[403]
   Auth -->|yes| Load
   Load --> Status
-  Status -->|Pending| DelPending --> Ok204
-  Status -->|Confirmed| DelConfirmed --> Restock --> Ok204
+  Status -->|Pending| SoftPending --> Ok204
+  Status -->|Confirmed| SoftConfirmed --> Restock --> Ok204
   Status -->|Shipped or Delivered| Conflict409
 ```
 
 | Status | When |
 |--------|------|
-| **204 No Content** | Order deleted |
+| **204 No Content** | Order soft-deleted |
 | **401 Unauthorized** | Missing or invalid bearer token |
 | **403 Forbidden** | Authenticated but not Admin |
-| **404 Not Found** | Order not found; body `{ "error": "..." }` |
+| **404 Not Found** | Order missing or already soft-deleted; body `{ "error": "..." }` |
 | **409 Conflict** | Shipped/Delivered not allowed, or concurrent/inventory conflict; body `{ "error": "..." }` |
 
 **Example:**

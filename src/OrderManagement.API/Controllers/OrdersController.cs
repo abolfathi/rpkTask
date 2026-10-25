@@ -105,9 +105,10 @@ public sealed class OrdersController : ControllerBase
     [Authorize(Roles = AppRoles.Admin)]
     [EndpointSummary("Delete order")]
     [EndpointDescription(
-        "Permanently deletes an order and its line items. Admin only. " +
-        "Pending: delete with no inventory change. Confirmed: restore deducted stock then delete " +
-        "in one transaction. Shipped and Delivered orders are rejected with 409 Conflict.")]
+        "Soft-deletes an order (IsDeleted/DeletedAt). Admin only. Order and line items are retained. " +
+        "Pending: mark deleted with no inventory change. Confirmed: mark deleted then restore deducted " +
+        "stock in one transaction. Soft-deleted orders are hidden from Get/Search. " +
+        "Shipped and Delivered orders are rejected with 409 Conflict.")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]

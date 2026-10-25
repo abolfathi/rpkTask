@@ -22,6 +22,13 @@ public class OrderConfiguration : IEntityTypeConfiguration<Order>
         builder.Property(o => o.UpdatedAt)
             .IsRequired();
 
+        builder.Property(o => o.IsDeleted)
+            .IsRequired();
+
+        builder.Property(o => o.DeletedAt);
+
+        builder.HasQueryFilter(o => !o.IsDeleted);
+
         builder.HasOne(o => o.Customer)
             .WithMany()
             .HasForeignKey(o => o.CustomerId)
