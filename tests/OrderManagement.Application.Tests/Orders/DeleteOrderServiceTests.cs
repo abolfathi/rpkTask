@@ -54,4 +54,18 @@ public sealed class DeleteOrderServiceTests
         Assert.Equal(DeleteOrderErrorKind.Conflict, result.ErrorKind);
         Assert.Contains("Inventory", result.ErrorMessage);
     }
+
+    [Fact]
+    public async Task DeleteAsync_NotAllowed_ReturnsConflict()
+    {
+        var orderId = Guid.NewGuid();
+        _persistence
+            .Setup(p => p.DeleteOrderAsync(orderId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(DeleteOrderOutcome.NotAllowed("Orders with status 'Shipped' cannot be deleted."));
+
+        var result = await _sut.DeleteAsync(orderId);
+
+        Assert.Equal(DeleteOrderErrorKind.Conflict, result.ErrorKind);
+        Assert.Contains("Shipped", result.ErrorMessage);
+    }
 }

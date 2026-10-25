@@ -240,6 +240,7 @@ public sealed class OrderPersistence : IOrderPersistence
         try
         {
             var order = await _dbContext.Orders
+                .AsNoTracking()
                 .Include(o => o.Items)
                 .FirstOrDefaultAsync(o => o.Id == orderId, cancellationToken);
 
@@ -249,38 +250,68 @@ public sealed class OrderPersistence : IOrderPersistence
                 return DeleteOrderOutcome.OrderNotFound();
             }
 
-            if (order.Status != OrderStatus.Pending)
+            if (order.Status is OrderStatus.Shipped or OrderStatus.Delivered)
             {
-                var requiredByProduct = order.Items
-                    .GroupBy(i => i.ProductId)
-                    .OrderBy(g => g.Key)
-                    .Select(g => (ProductId: g.Key, Quantity: g.Sum(i => i.Quantity)))
-                    .ToList();
+                await transaction.RollbackAsync(cancellationToken);
+                return DeleteOrderOutcome.NotAllowed(
+                    $"Orders with status '{order.Status}' cannot be deleted.");
+            }
 
-                var now = DateTimeOffset.UtcNow;
-                foreach (var (productId, restoreQty) in requiredByProduct)
+            if (order.Status == OrderStatus.Pending)
+            {
+                var deleted = await _dbContext.Orders
+                    .Where(o => o.Id == orderId && o.Status == OrderStatus.Pending)
+                    .ExecuteDeleteAsync(cancellationToken);
+
+                if (deleted != 1)
                 {
-                    var affected = await _dbContext.Inventories
-                        .Where(i => i.ProductId == productId)
-                        .ExecuteUpdateAsync(
-                            setters => setters
-                                .SetProperty(i => i.Quantity, i => i.Quantity + restoreQty)
-                                .SetProperty(i => i.UpdatedAt, now),
-                            cancellationToken);
+                    await transaction.RollbackAsync(cancellationToken);
+                    return DeleteOrderOutcome.ConcurrentConflict(
+                        "The order was modified by another request during delete. Try again.");
+                }
 
-                    if (affected != 1)
-                    {
-                        await transaction.RollbackAsync(cancellationToken);
-                        return DeleteOrderOutcome.ConcurrentConflict(
-                            $"Inventory for product '{productId}' could not be restored during delete. Try again.");
-                    }
+                await transaction.CommitAsync(cancellationToken);
+                return DeleteOrderOutcome.Success();
+            }
+
+            // Confirmed: delete only while still Confirmed, then restore inventory in the same TX.
+            var requiredByProduct = order.Items
+                .GroupBy(i => i.ProductId)
+                .OrderBy(g => g.Key)
+                .Select(g => (ProductId: g.Key, Quantity: g.Sum(i => i.Quantity)))
+                .ToList();
+
+            var deletedConfirmed = await _dbContext.Orders
+                .Where(o => o.Id == orderId && o.Status == OrderStatus.Confirmed)
+                .ExecuteDeleteAsync(cancellationToken);
+
+            if (deletedConfirmed != 1)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return DeleteOrderOutcome.ConcurrentConflict(
+                    "The order was modified by another request during delete. Try again.");
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            foreach (var (productId, restoreQty) in requiredByProduct)
+            {
+                var affected = await _dbContext.Inventories
+                    .Where(i => i.ProductId == productId)
+                    .ExecuteUpdateAsync(
+                        setters => setters
+                            .SetProperty(i => i.Quantity, i => i.Quantity + restoreQty)
+                            .SetProperty(i => i.UpdatedAt, now),
+                        cancellationToken);
+
+                if (affected != 1)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    return DeleteOrderOutcome.ConcurrentConflict(
+                        $"Inventory for product '{productId}' could not be restored during delete. Try again.");
                 }
             }
 
-            _dbContext.Orders.Remove(order);
-            await _dbContext.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
-
             return DeleteOrderOutcome.Success();
         }
         catch

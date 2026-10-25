@@ -4,6 +4,7 @@ public enum DeleteOrderOutcomeKind
 {
     Success,
     OrderNotFound,
+    NotAllowed,
     ConcurrentConflict
 }
 
@@ -21,6 +22,12 @@ public sealed class DeleteOrderOutcome
     {
         Kind = DeleteOrderOutcomeKind.OrderNotFound,
         Message = "Order was not found."
+    };
+
+    public static DeleteOrderOutcome NotAllowed(string message) => new()
+    {
+        Kind = DeleteOrderOutcomeKind.NotAllowed,
+        Message = message
     };
 
     public static DeleteOrderOutcome ConcurrentConflict(string message) => new()

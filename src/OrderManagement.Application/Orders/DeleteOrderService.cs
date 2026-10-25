@@ -20,6 +20,9 @@ public sealed class DeleteOrderService
             DeleteOrderOutcomeKind.Success => DeleteOrderResult.Success(),
             DeleteOrderOutcomeKind.OrderNotFound =>
                 DeleteOrderResult.NotFound($"Order '{orderId}' was not found."),
+            DeleteOrderOutcomeKind.NotAllowed =>
+                DeleteOrderResult.Conflict(
+                    outcome.Message ?? "Orders in this status cannot be deleted."),
             DeleteOrderOutcomeKind.ConcurrentConflict =>
                 DeleteOrderResult.Conflict(
                     outcome.Message ?? "The order or inventory was modified by another request."),

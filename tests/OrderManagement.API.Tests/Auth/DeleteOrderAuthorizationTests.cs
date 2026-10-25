@@ -82,6 +82,24 @@ public sealed class DeleteOrderAuthorizationTests
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    [Fact]
+    public async Task DeleteOrder_WithAdminToken_WhenNotAllowed_ReturnsConflict()
+    {
+        var orderId = Guid.NewGuid();
+        _factory.Persistence
+            .Setup(p => p.DeleteOrderAsync(orderId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(DeleteOrderOutcome.NotAllowed("Orders with status 'Delivered' cannot be deleted."));
+
+        var token = await CreateDevTokenAsync(AppRoles.Admin);
+
+        using var request = new HttpRequestMessage(HttpMethod.Delete, $"/api/orders/{orderId}");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
     private async Task<string> CreateDevTokenAsync(string role)
     {
         var response = await _client.PostAsJsonAsync("/api/dev/tokens", new DevTokenRequest

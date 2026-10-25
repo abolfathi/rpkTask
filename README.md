@@ -1,6 +1,6 @@
 # Order Management
 
-.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create/get/search/delete orders, status transitions (including inventory deduct on confirm), JWT Bearer authentication, and Serilog logging are implemented. Order deletion is Admin-only and restores inventory when stock was previously deducted.
+.NET 10 solution for a technical assessment: an order-management API built with Clean Architecture. The domain model, SQL Server persistence (EF Core migrations and Development seed data), create/get/search/delete orders, status transitions (including inventory deduct on confirm), JWT Bearer authentication, and Serilog logging are implemented. Order deletion is Admin-only: Pending deletes without inventory change, Confirmed restores stock then deletes, and Shipped/Delivered are rejected.
 
 ## Tech stack
 
@@ -29,7 +29,7 @@
 | Search orders | **Implemented** | `SearchOrdersService`; filters, pagination, sort by `CreatedAt` desc then `Id` desc |
 | Status transitions | **Implemented** | `UpdateOrderStatusService`; `PATCH /api/orders/{id}/status`; forward-only `Pending → Confirmed → Shipped → Delivered` |
 | Inventory on confirm | **Implemented** | Confirm validates stock for all lines and deducts atomically in a DB transaction |
-| Order deletion | **Implemented** | `DELETE /api/orders/{id}`; Admin only; cascade OrderItems; restore inventory when status is not Pending |
+| Order deletion | **Implemented** | `DELETE /api/orders/{id}`; Admin only; Pending (no inventory) or Confirmed (restore then delete); Shipped/Delivered → 409 |
 | Authentication / authorization | **Implemented** | JWT Bearer; roles `Admin` and `User`; order read/write require any authenticated role; delete requires `Admin` |
 | Structured logging | **Implemented** | Serilog on the API host; Console + rolling File; HTTP request logging |
 | Unit tests | **Implemented** | xUnit + Moq for create, get, search, and status-update application services |
@@ -303,7 +303,7 @@ Then call orders with `Authorization: Bearer <accessToken>`, or paste the token 
 | `GET` | `/api/orders/{id}` | Get a single order by ID (includes line items); requires auth |
 | `GET` | `/api/orders` | Search orders with optional filters and pagination; requires auth |
 | `PATCH` | `/api/orders/{id}/status` | Advance order status (inventory deducted on confirm); requires auth |
-| `DELETE` | `/api/orders/{id}` | Delete order (Admin only); may restore inventory |
+| `DELETE` | `/api/orders/{id}` | Delete Pending/Confirmed (Admin only); Shipped/Delivered → 409 |
 | `POST` | `/api/dev/tokens` | Development: issue test JWT (`Admin` or `User`) |
 
 #### Create order — `POST /api/orders`
@@ -444,29 +444,35 @@ Content-Type: application/json
 
 #### Delete order — `DELETE /api/orders/{id}`
 
-Admin only. Permanently removes the order and cascaded line items.
+Admin only. Permanently removes the order and cascaded line items when allowed.
 
-| Order status | Inventory |
-|--------------|-----------|
-| `Pending` | Unchanged (stock was never deducted) |
-| `Confirmed` / `Shipped` / `Delivered` | Quantities for all lines restored in the same DB transaction, then delete |
+| Order status | Allowed? | Inventory |
+|--------------|----------|-----------|
+| `Pending` | Yes | Unchanged (stock was never deducted) |
+| `Confirmed` | Yes | Quantities restored in the same DB transaction after a status-conditional delete |
+| `Shipped` | No | Unchanged |
+| `Delivered` | No | Unchanged |
+
+Deletion uses a transaction and conditional `ExecuteDelete` (`Status` still `Pending` or `Confirmed`) so a concurrent status change cannot silently delete the wrong state. Failed inventory restore rolls back the delete.
 
 ```mermaid
 flowchart TD
   Client[Admin DELETE /api/orders/id]
   Auth{"Role Admin?"}
-  Svc[DeleteOrderService]
-  Persist[DeleteOrderAsync TX]
-  Pending{"Status Pending?"}
-  Restock[Restore inventory per product]
-  Del[Delete order cascade items]
+  Load[Load order in TX]
+  Status{Status?}
+  DelPending[ExecuteDelete Status Pending]
+  DelConfirmed[ExecuteDelete Status Confirmed]
+  Restock[Restore inventory]
+  Conflict409[409 no side effects]
+  Ok204[204]
   Client --> Auth
   Auth -->|no| Forbidden[403]
-  Auth -->|yes| Svc
-  Svc --> Persist
-  Persist --> Pending
-  Pending -->|yes| Del
-  Pending -->|no| Restock --> Del
+  Auth -->|yes| Load
+  Load --> Status
+  Status -->|Pending| DelPending --> Ok204
+  Status -->|Confirmed| DelConfirmed --> Restock --> Ok204
+  Status -->|Shipped or Delivered| Conflict409
 ```
 
 | Status | When |
@@ -475,7 +481,7 @@ flowchart TD
 | **401 Unauthorized** | Missing or invalid bearer token |
 | **403 Forbidden** | Authenticated but not Admin |
 | **404 Not Found** | Order not found; body `{ "error": "..." }` |
-| **409 Conflict** | Inventory restore conflict during delete; body `{ "error": "..." }` |
+| **409 Conflict** | Shipped/Delivered not allowed, or concurrent/inventory conflict; body `{ "error": "..." }` |
 
 **Example:**
 

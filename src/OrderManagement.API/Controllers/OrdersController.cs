@@ -106,8 +106,8 @@ public sealed class OrdersController : ControllerBase
     [EndpointSummary("Delete order")]
     [EndpointDescription(
         "Permanently deletes an order and its line items. Admin only. " +
-        "Pending orders do not change inventory. Confirmed, Shipped, or Delivered orders restore " +
-        "deducted stock for all lines in the same transaction before delete.")]
+        "Pending: delete with no inventory change. Confirmed: restore deducted stock then delete " +
+        "in one transaction. Shipped and Delivered orders are rejected with 409 Conflict.")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
