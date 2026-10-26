@@ -1,9 +1,11 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Options;
 using OrderManagement.API.Auth;
 using OrderManagement.API.OpenApi;
 using OrderManagement.Application;
 using OrderManagement.Infrastructure;
+using OrderManagement.Infrastructure.Persistence;
 using Serilog;
 
 Log.Logger = new LoggerConfiguration()
@@ -37,13 +39,30 @@ try
     builder.Services.AddAuthorization();
 
     builder.Services.AddControllers();
+    builder.Services.AddHealthChecks()
+        .AddDbContextCheck<AppDbContext>();
     builder.Services.AddOpenApi(options =>
     {
         options.AddDocumentTransformer<BearerSecuritySchemeTransformer>();
         options.AddOperationTransformer<BearerRequirementTransformer>();
     });
 
+    if (builder.Configuration.GetValue("ForwardedHeaders:Enabled", false))
+    {
+        builder.Services.Configure<ForwardedHeadersOptions>(options =>
+        {
+            options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+            options.KnownIPNetworks.Clear();
+            options.KnownProxies.Clear();
+        });
+    }
+
     var app = builder.Build();
+
+    if (app.Configuration.GetValue("ForwardedHeaders:Enabled", false))
+    {
+        app.UseForwardedHeaders();
+    }
 
     if (app.Environment.IsDevelopment())
     {
@@ -55,7 +74,10 @@ try
         });
     }
 
-    app.UseHttpsRedirection();
+    if (!app.Configuration.GetValue("DisableHttpsRedirection", false))
+    {
+        app.UseHttpsRedirection();
+    }
 
     app.UseSerilogRequestLogging(options =>
     {
@@ -68,6 +90,7 @@ try
     app.UseAuthentication();
     app.UseAuthorization();
 
+    app.MapHealthChecks("/health");
     app.MapControllers();
 
     app.Run();

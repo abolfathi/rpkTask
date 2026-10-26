@@ -14,9 +14,10 @@
 | OpenAPI | `Microsoft.AspNetCore.OpenApi` 10.0.9 |
 | Swagger UI | `Swashbuckle.AspNetCore.SwaggerUI` (Development; consumes `/openapi/v1.json`; Bearer authorize) |
 | JWT Bearer | `Microsoft.AspNetCore.Authentication.JwtBearer` 10.0.9 |
-| Serilog | `Serilog.AspNetCore` 10.0.0; Console + rolling File sinks |
+| Serilog | `Serilog.AspNetCore` 10.0.0; Console + rolling File (Development); Console only (Production) |
 | xUnit / Moq | Application unit tests; API auth tests (`Microsoft.AspNetCore.Mvc.Testing`) |
 | Database (Development) | SQL Server LocalDB (`OrderManagement`) |
+| Docker | Linux containers: API (`.NET 10` aspnet), SQL Server 2022, one-shot EF migrate |
 
 ## Implementation status
 
@@ -73,6 +74,9 @@ flowchart TB
 
 ```
 OrderManagement.sln
+Dockerfile
+docker-compose.yml
+.env.example
 src/
 ├── OrderManagement.API/
 │   ├── Auth/                        # JwtOptions, token service, roles
@@ -124,6 +128,7 @@ tests/
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
 - [EF Core command-line tools](https://learn.microsoft.com/ef/core/cli/dotnet) (`dotnet-ef`)
 - SQL Server LocalDB (default Development connection), or another SQL Server instance
+- [Docker Engine](https://docs.docker.com/get-docker/) (optional; required for Compose and for Infrastructure tests on non-Windows)
 
 Install the EF tools if needed:
 
@@ -165,11 +170,11 @@ The API host uses **Serilog** (not Application/Infrastructure packages):
 | Sink | Details |
 |------|---------|
 | Console | Timestamp, level, source context, message, exception |
-| File | `Logs/order-management-.log`, daily rolling, 14 files retained (`Logs/` is gitignored) |
+| File | `Logs/order-management-.log`, daily rolling, 14 files retained (`Logs/` is gitignored). Omitted in Production (`appsettings.Production.json`) so containers log to stdout only. |
 
 | Environment | Default level | Notes |
 |-------------|---------------|-------|
-| Base / Production-oriented | `Information` | `Microsoft.AspNetCore` and `Microsoft.EntityFrameworkCore` overridden to `Warning` |
+| Base / Production | `Information` | `Microsoft.AspNetCore` and `Microsoft.EntityFrameworkCore` overridden to `Warning` |
 | Development | `Debug` | Same AspNetCore/EF overrides |
 
 HTTP requests are logged once via `UseSerilogRequestLogging` (method, path, status, elapsed, optional `RequestId`). Request/response bodies, Authorization headers, JWT keys, and connection strings are not logged. Startup failures use `Log.Fatal`; there is no separate exception middleware that changes HTTP responses.
@@ -200,6 +205,8 @@ This command:
 2. In the Development environment, executes the `UseSeeding` / `UseAsyncSeeding` callbacks registered in Infrastructure DI, which call `DevelopmentDataSeeder`
 
 Seeding is registered **only** when the host environment is Development.
+
+Docker Compose runs the same EF CLI in a one-shot `migrate` service (Production environment, so **no** Bogus seed). See [Docker Compose](#docker-compose).
 
 ### Seed data summary
 
@@ -232,8 +239,11 @@ dotnet run --project src/OrderManagement.API --launch-profile https
 |---------|------|
 | `http` (default) | `http://localhost:5184` |
 | `https` | `https://localhost:7038`, `http://localhost:5184` |
+| Docker Compose `api` | `http://localhost:8080` (see [Docker Compose](#docker-compose)) |
 
 `ASPNETCORE_ENVIRONMENT` is `Development` in both launch profiles. Launch profiles open Swagger UI (`/swagger`).
+
+Anonymous `GET /health` reports host + SQL Server connectivity (`200` healthy, `503` unhealthy). Compose disables HTTPS redirection (`DisableHttpsRedirection=true`) and enables `X-Forwarded-*` processing (`ForwardedHeaders:Enabled=true`) so TLS can terminate at a reverse proxy.
 
 ### OpenAPI and Swagger UI (Development)
 
@@ -264,6 +274,7 @@ Swagger UI is enabled only in Development and uses the built-in OpenAPI document
 | `PATCH` | `/api/orders/{id}/status` | Authenticated (`Admin` or `User`) |
 | `DELETE` | `/api/orders/{id}` | Authenticated **`Admin` only** (User → **403**) |
 | `POST` | `/api/dev/tokens` | Anonymous; **Development only** (404 otherwise) |
+| `GET` | `/health` | Anonymous |
 
 Unauthenticated calls to order endpoints return **401 Unauthorized**. Authenticated Users calling delete receive **403 Forbidden**.
 
@@ -315,6 +326,7 @@ Then call orders with `Authorization: Bearer <accessToken>`, or paste the token 
 | `PATCH` | `/api/orders/{id}/status` | Advance order status (inventory deducted on confirm); requires auth |
 | `DELETE` | `/api/orders/{id}` | Soft-delete Pending/Confirmed (Admin only); Shipped/Delivered → 409 |
 | `POST` | `/api/dev/tokens` | Development: issue test JWT (`Admin` or `User`) |
+| `GET` | `/health` | Liveness/readiness including SQL Server (`AppDbContext`); anonymous |
 
 #### Create order — `POST /api/orders`
 
@@ -540,17 +552,66 @@ Authorization: Bearer <admin-access-token>
 |---------|----------|
 | `tests/OrderManagement.Application.Tests` | Application services (xUnit + Moq; `IOrderPersistence` mocked), including create, bulk create, and delete outcomes |
 | `tests/OrderManagement.API.Tests` | JWT auth; delete Admin-only; search (401/200/400 + criteria); Dev token create/validation |
-| `tests/OrderManagement.Infrastructure.Tests` | Soft-delete and bulk `SaveOrdersAsync` (success + transaction rollback) against SQL Server LocalDB |
+| `tests/OrderManagement.Infrastructure.Tests` | Soft-delete and bulk `SaveOrdersAsync` (success + transaction rollback) against SQL Server |
 
 API auth tests use `WebApplicationFactory` with an in-memory `Jwt:Key` and a stubbed `IOrderPersistence` (no SQL Server required for those cases).
 
-Infrastructure tests require **SQL Server LocalDB** (`(localdb)\mssqllocaldb`). They create and drop a unique database per test run and apply EF migrations — EF InMemory is not used.
+Infrastructure tests create and drop a unique database per run and apply EF migrations (not EF InMemory). Connection resolution:
+
+1. `TEST_SQLSERVER_CONNECTION` or `ConnectionStrings__DefaultConnection` if set (Linux CI with a SQL service)
+2. Otherwise SQL Server LocalDB on Windows
+3. Otherwise [Testcontainers](https://dotnet.testcontainers.org/) `MsSql` (requires Docker)
 
 From the repository root:
 
 ```bash
 dotnet test
 ```
+
+## Docker Compose
+
+The API is a single Linux container (Kestrel). Compose also starts SQL Server and a one-shot migration job. Do **not** use LocalDB or `Trusted_Connection` in containers.
+
+| Service | Image / target | Role |
+|---------|----------------|------|
+| `sql` | `mcr.microsoft.com/mssql/server:2022-latest` | SQL Server (named volume `sql_data`) |
+| `migrate` | Dockerfile target `migrate` | `dotnet ef database update` then exits |
+| `api` | Dockerfile target `runtime` | `OrderManagement.API` on port 8080 |
+
+**Local stack**
+
+1. Copy `.env.example` to `.env` and set `MSSQL_SA_PASSWORD` (SQL complexity rules) and `JWT_KEY` (at least 32 characters). `.env` is gitignored.
+2. From the repository root:
+
+```bash
+docker compose up --build
+```
+
+| Resource | URL |
+|----------|-----|
+| API | `http://localhost:8080` |
+| Health | `http://localhost:8080/health` |
+| SQL Server | `localhost:1433` (SA; password from `.env`) |
+
+Compose sets `ASPNETCORE_ENVIRONMENT=Production` on `api` and `migrate`:
+
+- Swagger UI and `POST /api/dev/tokens` are off
+- Development Bogus seeding is **not** registered
+- Serilog writes to **console only** (container log driver)
+
+To enable Swagger, dev tokens, and seed data **on a private machine only**, set `ASPNETCORE_ENVIRONMENT=Development` on both `migrate` (seed runs during `database update`) and `api`. Do not expose that configuration on a public port.
+
+**Production**
+
+Run only the API image against a managed SQL Server. Inject `ConnectionStrings__DefaultConnection` (SQL authentication) and `Jwt__Key`. Do not publish SQL to the internet. Terminate TLS at a reverse proxy and keep `DisableHttpsRedirection=true` plus `ForwardedHeaders__Enabled=true` on the container. Callers must obtain JWTs from a real issuer; this repository only mints tokens in Development.
+
+Rebuild and apply schema:
+
+```bash
+docker compose up --build
+```
+
+The `migrate` service runs before `api` (`depends_on: service_completed_successfully`). The API host still does **not** call `Database.Migrate()` on startup.
 
 ## Entity relationship diagram
 
@@ -589,7 +650,7 @@ erDiagram
 
   Inventory {
     guid Id PK
-    guid ProductId FK_UK
+    guid ProductId FK,UK
     int Quantity
     datetimeoffset UpdatedAt
   }
